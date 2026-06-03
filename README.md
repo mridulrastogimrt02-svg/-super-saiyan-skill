@@ -4,13 +4,30 @@ Ultimate consolidated bug bounty hunting skill for opencode. 160+ vulnerability 
 
 ## Installation
 
+We provide quick installation scripts for easy setup.
+
+**Linux / macOS:**
 ```bash
-git clone https://github.com/YOUR_USER/super-saiyan-skill.git ~/.claude/skills/super-saiyan
+curl -sSL https://raw.githubusercontent.com/mridulrastogimrt02-svg/-super-saiyan-skill/main/install.sh | bash
+```
+
+**Windows (PowerShell):**
+```powershell
+iwr https://raw.githubusercontent.com/mridulrastogimrt02-svg/-super-saiyan-skill/main/install.ps1 -UseBasicParsing | iex
+```
+
+Alternatively, you can install manually:
+```bash
+git clone https://github.com/mridulrastogimrt02-svg/-super-saiyan-skill.git ~/.claude/skills/super-saiyan
 ```
 
 Then load with: `/skill super-saiyan`
 
+## ⚡ Quick Reference
+See [CHEATSHEET.md](CHEATSHEET.md) for a condensed list of high-value triggers and patterns to keep open during your hunts.
+
 ## Sections
+
 
 - 3.0-3.24: XSS (all types + bypasses)
 - 3.25-3.50: Injection (SQL, NoSQL, SSTI, LDAP, XPath, CRLF)
