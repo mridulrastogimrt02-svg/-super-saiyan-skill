@@ -16863,3 +16863,168 @@ RSEOF
 - [ ] Log failed attempts (don't re-test same techniques)
 - [ ] Record "weird but not exploitable" behaviors (future gadgets)
 - [ ] Note any sibling leads for next session
+
+---
+
+## 🏆 10/10 ENHANCED ADDITIONS
+
+### Pre-Submit Checklist (Report Quality Gate)
+
+```
+[ ] Minimized prerequisites? (0-click > 1-click > auth required)
+[ ] Impact clearly stated in FIRST sentence (no preamble)
+[ ] Exact HTTP request + response provided (curl/Burp format)
+[ ] Search confirmed NOT a duplicate (HackerOne disclosed, Google, CVE)
+[ ] CVSS score matches actual impact (not inflated, not deflated)
+[ ] Under 600 words — concise, direct, no fluff
+[ ] Human tone — not robotic, not accusatory
+[ ] NEVER used: "could potentially", "may allow", "might lead to"
+[ ] All 7 Pre-report gate questions passed
+[ ] NOT on the ALWAYS-REJECTED list below
+```
+
+**If any box is unchecked → DO NOT SUBMIT.**
+
+### 🛑 ALWAYS-REJECTED — Never waste time reporting these
+- DNS-only SSRF without further impact
+- Self-XSS without a delivery mechanism
+- Missing security headers alone (HSTS, X-Frame-Options)
+- Clickjacking on static pages without sensitive action
+- CSRF on login/logout
+- Rate limiting on non-auth endpoints
+- Software version disclosure in headers
+- SPF/DKIM/DMARC misconfiguration
+- Open redirect without OAuth/auth token chain
+- Internal IP disclosure without actionable exploitation
+
+---
+
+### Vulnerability Priority Matrix (Bounty Ranges)
+
+| Priority | Vuln Class | Typical Bounty | Detection |
+|:---|:---|:---|:---|
+| 🏆 CRITICAL | RCE (SSTI, SQLi OUTFILE, Deser) | $5K-$50K | Easy-Med |
+| 🏆 CRITICAL | SSRF → Cloud Metadata | $5K-$40K | Blind |
+| ⭐ HIGH | ATO (OAuth, SAML, Reset) | $2K-$30K | Medium |
+| ⭐ HIGH | IDOR (massive scale) | $1K-$20K | Medium |
+| ⭐ HIGH | GraphQL (batching, IDOR) | $1K-$15K | Medium |
+| ⭐ HIGH | Business Logic | $1K-$15K | Hard |
+| 🔥 MEDIUM | XSS (stored) | $500-$10K | Easy |
+| 🔥 MEDIUM | SSRF (with impact) | $1K-$10K | Blind |
+| 🔥 MEDIUM | SQLi (non-RCE) | $1K-$8K | Easy-Med |
+| 🔥 MEDIUM | Prototype Pollution | $500-$8K | Hard |
+| 💡 LOW | Open Redirect (chained) | $500-$5K | Easy |
+| ❌ REJECT | ALWAYS-REJECTED list | $0 | — |
+
+---
+
+### Chain Patterns — A→B→C Escalation
+
+| From | To | Impact | Bounty Range |
+|:---|:---|:---|:---|
+| IDOR → Auth Bypass | Read → Change email → Login | ATO | $1K-$15K |
+| SSRF → Cloud Metadata | Request → AWS keys | RCE | $5K-$40K |
+| XSS → Session Theft | Script → Steal token | ATO | $500-$10K |
+| SQLi → Web Shell | OUTFILE → PHP shell | RCE | $10K-$50K |
+| Open Redirect → OAuth | Redirect → Auth code theft | ATO | $2K-$25K |
+| Prototype Pollution → RCE | __proto__ → Template RCE | RCE | $5K-$35K |
+| Subdomain Takeover → OAuth | Claim → Redirect hijack | ATO | $500-$8K |
+
+---
+
+### Rapid Hunt Initiation — First 10 Minutes
+
+```
+Minute 0-2:  subfinder -d target.com | httpx -silent | tee live.txt
+Minute 2-4:  gau target.com | uro | tee urls.txt
+Minute 4-5:  nuclei -l live.txt -t cves/ -t exposures/
+Minute 5-6:  katana -list live.txt -jc -kf all | uro >> urls.txt
+Minute 6-7:  naabu -list live.txt -top-1000 | httpx
+Minute 7-8:  Check gowitness screenshots
+Minute 8-10: Review JS files for endpoints + secrets
+```
+
+**After 10 minutes → Pick a vuln class and deep dive.**
+
+---
+
+## END OF SKILL — Happy Hunting! 🎯
+
+
+---
+
+## 🏆 10/10 ENHANCED ADDITIONS
+
+### Pre-Submit Checklist (Report Quality Gate)
+
+```
+[ ] Minimized prerequisites? (0-click > 1-click > auth required)
+[ ] Impact clearly stated in FIRST sentence (no preamble)
+[ ] Exact HTTP request + response provided (curl/Burp format)
+[ ] Search confirmed NOT a duplicate (HackerOne disclosed, Google, CVE)
+[ ] CVSS score matches actual impact (not inflated, not deflated)
+[ ] Under 600 words — concise, direct, no fluff
+[ ] Human tone — not robotic, not accusatory
+[ ] NEVER used: "could potentially", "may allow", "might lead to"
+[ ] All 7 Pre-report gate questions passed
+[ ] NOT on the ALWAYS-REJECTED list below
+```
+
+**If any box is unchecked → DO NOT SUBMIT.**
+
+### 🛑 ALWAYS-REJECTED — Never waste time reporting these
+- DNS-only SSRF without further impact
+- Self-XSS without a delivery mechanism
+- Missing security headers alone (HSTS, X-Frame-Options)
+- Clickjacking on static pages without sensitive action
+- CSRF on login/logout
+- Rate limiting on non-auth endpoints
+- Software version disclosure in headers
+- SPF/DKIM/DMARC misconfiguration
+- Open redirect without OAuth/auth token chain
+- Internal IP disclosure without actionable exploitation
+
+### Vulnerability Priority Matrix (Bounty Ranges)
+
+| Priority | Vuln Class | Typical Bounty | Detection |
+|:---|:---|:---|:---|
+| 🏆 CRITICAL | RCE (SSTI, SQLi OUTFILE, Deser) | $5K-$50K | Easy-Med |
+| 🏆 CRITICAL | SSRF → Cloud Metadata | $5K-$40K | Blind |
+| ⭐ HIGH | ATO (OAuth, SAML, Reset) | $2K-$30K | Medium |
+| ⭐ HIGH | IDOR (massive scale) | $1K-$20K | Medium |
+| ⭐ HIGH | GraphQL (batching, IDOR) | $1K-$15K | Medium |
+| ⭐ HIGH | Business Logic | $1K-$15K | Hard |
+| 🔥 MEDIUM | XSS (stored) | $500-$10K | Easy |
+| 🔥 MEDIUM | SSRF (with impact) | $1K-$10K | Blind |
+| 🔥 MEDIUM | SQLi (non-RCE) | $1K-$8K | Easy-Med |
+| 🔥 MEDIUM | Prototype Pollution | $500-$8K | Medium |
+| 💡 LOW | Open Redirect (chained) | $500-$5K | Easy |
+| ❌ REJECT | ALWAYS-REJECTED list | $0 | — |
+
+### Chain Patterns — A→B→C Escalation
+
+| From | To | Impact | Bounty Range |
+|:---|:---|:---|:---|
+| IDOR → Auth Bypass | Read → Change email → Login | ATO | $1K-$15K |
+| SSRF → Cloud Metadata | Request → AWS keys | RCE | $5K-$40K |
+| XSS → Session Theft | Script → Steal token | ATO | $500-$10K |
+| SQLi → Web Shell | OUTFILE → PHP shell | RCE | $10K-$50K |
+| Open Redirect → OAuth | Redirect → Auth code theft | ATO | $2K-$25K |
+| Prototype Pollution → RCE | __proto__ → Template RCE | RCE | $5K-$35K |
+| Subdomain Takeover → OAuth | Claim → Redirect hijack | ATO | $500-$8K |
+
+### Rapid Hunt Initiation — First 10 Minutes
+
+```
+Minute 0-2:  subfinder -d target.com | httpx -silent | tee live.txt
+Minute 2-4:  gau target.com | uro | tee urls.txt
+Minute 4-5:  nuclei -l live.txt -t cves/ -t exposures/
+Minute 5-6:  katana -list live.txt -jc -kf all | uro >> urls.txt
+Minute 6-7:  naabu -list live.txt -top-1000 | httpx
+Minute 7-8:  Check gowitness screenshots
+Minute 8-10: Review JS files for endpoints + secrets
+```
+
+**After 10 minutes → Pick a vuln class and deep dive.**
+
+## END OF SKILL — Happy Hunting! 🎯
